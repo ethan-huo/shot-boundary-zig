@@ -50,6 +50,23 @@ python3 scripts/compare_segment_outputs.py \
 
 如果这个命令返回非零退出码，不要接 `lens`。先看报告里的 `checksums_equal`、`scenes_equal`、`single_frame.max_abs_diff` 和 `many_hot.max_abs_diff`。
 
+## 5. 评估候选 Runtime
+
+如果新增 CoreML、ONNX Runtime、Accelerate 或自定义 kernel 路径，先让候选路径输出同样的标准 JSON，再运行：
+
+```bash
+python3 scripts/evaluate_runtime_candidate.py \
+  --python target/reports/python-reference.json \
+  --baseline-rust target/reports/rust-segment.json \
+  --candidate target/reports/candidate-runtime.json \
+  --candidate-name candidate-runtime \
+  --require-python-fps \
+  --output-json target/reports/runtime-candidate.json \
+  --output-md target/reports/runtime-candidate.md
+```
+
+这个 gate 同时检查 Python/Rust 数值一致性和候选实现是否达到官方 TensorFlow Python 的 mean FPS。失败时不要替换默认 backend。
+
 ## 输出约定
 
 Python 和 Rust 输出都使用同一组核心字段：

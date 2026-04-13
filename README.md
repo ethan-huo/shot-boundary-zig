@@ -31,6 +31,7 @@
 - 可行性评估文档：`docs/ASSESSMENT.md`
 - 当前视频解码压测基线：`docs/PERF.md`
 - 模型移植入口、权重导出脚本和本地对齐脚本：`docs/PORTING.md`、`docs/ALIGNMENT.md`
+- runtime/backend 替换准入流程：`docs/RUNTIME.md`
 
 `segment` 已经可以用于本地验证，但只有在 Python/Rust 对齐报告通过后，才应该接入 `lens`：
 
@@ -56,4 +57,4 @@ cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4
   --format json > target/reports/rust-profile.json
 ```
 
-`decode-smoke` 也有 `bench-decode` alias。它只统计视频解码并缩放到模型输入尺寸 `48x27 RGB` 的吞吐，不能代表最终模型推理速度。真正的端到端结论使用 `segment` 和 `scripts/compare_segment_outputs.py`。
+`decode-smoke` 也有 `bench-decode` alias。它只统计视频解码并缩放到模型输入尺寸 `48x27 RGB` 的吞吐，不能代表最终模型推理速度。真正的端到端结论使用 `segment` 和 `scripts/compare_segment_outputs.py`。候选 runtime 或自定义 kernel 必须再通过 `scripts/evaluate_runtime_candidate.py`，并在需要替换默认路径时使用 `--require-python-fps`。
