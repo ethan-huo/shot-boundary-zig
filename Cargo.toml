@@ -1,0 +1,28 @@
+[package]
+name = "transnetv2-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Rust-first TransNetV2 shot-boundary detection library."
+publish = false
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+
+candle-core = { version = "0.10.2", optional = true }
+candle-nn = { version = "0.10.2", optional = true }
+clap = { version = "4.6.0", features = ["derive"], optional = true }
+ffmpeg-next = { version = "8.1.0", optional = true }
+safetensors = { version = "0.7.0", optional = true }
+serde_json = { version = "1.0.149", optional = true }
+
+[features]
+default = []
+candle = ["dep:candle-core", "dep:candle-nn", "dep:safetensors"]
+cli = ["dep:clap", "dep:serde_json", "candle", "video-io"]
+video-io = ["dep:ffmpeg-next"]
+
+[[bin]]
+name = "transnetv2-rs"
+path = "src/bin/transnetv2-rs.rs"
+required-features = ["cli"]

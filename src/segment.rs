@@ -1,0 +1,307 @@
+use std::time::Instant;
+
+use candle_core::{Device, Result as CandleResult, Tensor};
+use candle_nn::ops::sigmoid;
+use serde::Serialize;
+use thiserror::Error;
+
+use crate::model::TransNetV2;
+use crate::{
+    MODEL_CONTEXT_FRAMES, MODEL_INPUT_CHANNELS, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH,
+    MODEL_OUTPUT_FRAMES_PER_WINDOW, MODEL_WINDOW_FRAMES, Scene, SceneDetectionError,
+    predictions_to_scenes,
+};
+
+const FRAME_BYTES: usize = MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT * MODEL_INPUT_CHANNELS;
+
+#[derive(Debug, Error)]
+pub enum SegmentError {
+    #[error("candle error: {0}")]
+    Candle(#[from] candle_core::Error),
+
+    #[error("scene detection error: {0}")]
+    SceneDetection(#[from] SceneDetectionError),
+
+    #[cfg(feature = "video-io")]
+    #[error("video error: {0}")]
+    Video(#[from] crate::video::VideoError),
+
+    #[error("segment input cannot be empty")]
+    EmptyFrames,
+
+    #[error(
+        "segment input must be {expected_width}x{expected_height} RGB frames, got {width}x{height}x{channels}"
+    )]
+    UnexpectedFrameShape {
+        expected_width: usize,
+        expected_height: usize,
+        width: usize,
+        height: usize,
+        channels: usize,
+    },
+
+    #[error("frame buffer length {byte_len} is not divisible by frame size {frame_bytes}")]
+    InvalidFrameBuffer { byte_len: usize, frame_bytes: usize },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SegmentPredictions {
+    pub single_frame: Vec<f32>,
+    pub many_hot: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SegmentFramesTimings {
+    pub windowing_ms: f64,
+    pub inference_ms: f64,
+    pub postprocess_ms: f64,
+    pub total_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SegmentFramesReport {
+    pub frame_count: usize,
+    pub predictions: SegmentPredictions,
+    pub scenes: Vec<Scene>,
+    pub timings: SegmentFramesTimings,
+}
+
+#[cfg(feature = "video-io")]
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SegmentVideoTimings {
+    pub decode_ms: f64,
+    pub windowing_ms: f64,
+    pub inference_ms: f64,
+    pub postprocess_ms: f64,
+    pub total_ms: f64,
+}
+
+#[cfg(feature = "video-io")]
+#[derive(Debug, Clone, Serialize)]
+pub struct SegmentVideoReport {
+    pub source: crate::video::VideoInfo,
+    pub frame_count: usize,
+    pub target_width: usize,
+    pub target_height: usize,
+    pub checksum_fnv1a64: String,
+    pub limited_by_max_frames: bool,
+    pub predictions: SegmentPredictions,
+    pub scenes: Vec<Scene>,
+    pub timings: SegmentVideoTimings,
+}
+
+pub fn segment_frames(
+    model: &TransNetV2,
+    frames_rgb24: &[u8],
+    width: usize,
+    height: usize,
+    device: &Device,
+    threshold: f32,
+) -> Result<SegmentFramesReport, SegmentError> {
+    validate_frame_shape(width, height, MODEL_INPUT_CHANNELS)?;
+    let frame_count = frame_count_from_bytes(frames_rgb24.len(), FRAME_BYTES)?;
+    let mut single_frame = Vec::new();
+    let mut many_hot = Vec::new();
+    let mut windowing_ms = 0.0;
+    let mut inference_ms = 0.0;
+    let started_at = Instant::now();
+
+    for indices in window_source_indices(frame_count)? {
+        let window_started_at = Instant::now();
+        let window = build_window(frames_rgb24, FRAME_BYTES, &indices);
+        let input = Tensor::from_vec(
+            window,
+            (
+                1,
+                MODEL_WINDOW_FRAMES,
+                MODEL_INPUT_HEIGHT,
+                MODEL_INPUT_WIDTH,
+                MODEL_INPUT_CHANNELS,
+            ),
+            device,
+        )?;
+        windowing_ms += window_started_at.elapsed().as_secs_f64() * 1_000.0;
+
+        let inference_started_at = Instant::now();
+        let output = model.forward(&input)?;
+        single_frame.extend(center_probabilities(&output.single_frame_logits)?);
+        many_hot.extend(center_probabilities(&output.many_hot_logits)?);
+        inference_ms += inference_started_at.elapsed().as_secs_f64() * 1_000.0;
+    }
+
+    single_frame.truncate(frame_count);
+    many_hot.truncate(frame_count);
+
+    let postprocess_started_at = Instant::now();
+    let scenes = predictions_to_scenes(&single_frame, threshold)?;
+    let postprocess_ms = postprocess_started_at.elapsed().as_secs_f64() * 1_000.0;
+
+    Ok(SegmentFramesReport {
+        frame_count,
+        predictions: SegmentPredictions {
+            single_frame,
+            many_hot,
+        },
+        scenes,
+        timings: SegmentFramesTimings {
+            windowing_ms,
+            inference_ms,
+            postprocess_ms,
+            total_ms: started_at.elapsed().as_secs_f64() * 1_000.0,
+        },
+    })
+}
+
+#[cfg(feature = "video-io")]
+pub fn segment_video(
+    model: &TransNetV2,
+    video: impl AsRef<std::path::Path>,
+    device: &Device,
+    threshold: f32,
+    options: crate::video::DecodeSmokeOptions,
+) -> Result<SegmentVideoReport, SegmentError> {
+    let decoded = crate::video::decode_video_rgb24(video, options)?;
+    let frame_report = segment_frames(
+        model,
+        &decoded.data,
+        decoded.target_width,
+        decoded.target_height,
+        device,
+        threshold,
+    )?;
+
+    Ok(SegmentVideoReport {
+        source: decoded.source,
+        frame_count: frame_report.frame_count,
+        target_width: decoded.target_width,
+        target_height: decoded.target_height,
+        checksum_fnv1a64: decoded.checksum_fnv1a64,
+        limited_by_max_frames: decoded.limited_by_max_frames,
+        predictions: frame_report.predictions,
+        scenes: frame_report.scenes,
+        timings: SegmentVideoTimings {
+            decode_ms: decoded.elapsed_ms,
+            windowing_ms: frame_report.timings.windowing_ms,
+            inference_ms: frame_report.timings.inference_ms,
+            postprocess_ms: frame_report.timings.postprocess_ms,
+            total_ms: decoded.elapsed_ms + frame_report.timings.total_ms,
+        },
+    })
+}
+
+fn validate_frame_shape(width: usize, height: usize, channels: usize) -> Result<(), SegmentError> {
+    if (width, height, channels) != (MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, MODEL_INPUT_CHANNELS) {
+        return Err(SegmentError::UnexpectedFrameShape {
+            expected_width: MODEL_INPUT_WIDTH,
+            expected_height: MODEL_INPUT_HEIGHT,
+            width,
+            height,
+            channels,
+        });
+    }
+
+    Ok(())
+}
+
+fn frame_count_from_bytes(byte_len: usize, frame_bytes: usize) -> Result<usize, SegmentError> {
+    if byte_len == 0 {
+        return Err(SegmentError::EmptyFrames);
+    }
+    if byte_len % frame_bytes != 0 {
+        return Err(SegmentError::InvalidFrameBuffer {
+            byte_len,
+            frame_bytes,
+        });
+    }
+
+    Ok(byte_len / frame_bytes)
+}
+
+fn window_source_indices(frame_count: usize) -> Result<Vec<Vec<usize>>, SegmentError> {
+    if frame_count == 0 {
+        return Err(SegmentError::EmptyFrames);
+    }
+
+    let padded_start = MODEL_CONTEXT_FRAMES;
+    let remainder = frame_count % MODEL_OUTPUT_FRAMES_PER_WINDOW;
+    let padded_end = MODEL_CONTEXT_FRAMES + MODEL_OUTPUT_FRAMES_PER_WINDOW
+        - if remainder == 0 {
+            MODEL_OUTPUT_FRAMES_PER_WINDOW
+        } else {
+            remainder
+        };
+    let padded_count = padded_start + frame_count + padded_end;
+    let mut windows = Vec::new();
+    let mut ptr = 0;
+
+    while ptr + MODEL_WINDOW_FRAMES <= padded_count {
+        let mut indices = Vec::with_capacity(MODEL_WINDOW_FRAMES);
+        for padded_index in ptr..ptr + MODEL_WINDOW_FRAMES {
+            let source_index = if padded_index < padded_start {
+                0
+            } else if padded_index < padded_start + frame_count {
+                padded_index - padded_start
+            } else {
+                frame_count - 1
+            };
+            indices.push(source_index);
+        }
+        windows.push(indices);
+        ptr += MODEL_OUTPUT_FRAMES_PER_WINDOW;
+    }
+
+    Ok(windows)
+}
+
+fn build_window(frames_rgb24: &[u8], frame_bytes: usize, indices: &[usize]) -> Vec<u8> {
+    let mut window = Vec::with_capacity(indices.len() * frame_bytes);
+    for &index in indices {
+        let start = index * frame_bytes;
+        let end = start + frame_bytes;
+        window.extend_from_slice(&frames_rgb24[start..end]);
+    }
+    window
+}
+
+fn center_probabilities(logits: &Tensor) -> CandleResult<Vec<f32>> {
+    let probs = sigmoid(logits)?;
+    probs
+        .narrow(1, MODEL_CONTEXT_FRAMES, MODEL_OUTPUT_FRAMES_PER_WINDOW)?
+        .flatten_all()?
+        .to_vec1::<f32>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_single_short_clip_by_repeating_edge_frames() {
+        let windows = window_source_indices(1).unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].len(), MODEL_WINDOW_FRAMES);
+        assert!(windows[0].iter().all(|index| *index == 0));
+    }
+
+    #[test]
+    fn windows_match_upstream_center_stride_and_trim_policy() {
+        let windows = window_source_indices(51).unwrap();
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0][0], 0);
+        assert_eq!(windows[0][MODEL_CONTEXT_FRAMES], 0);
+        assert_eq!(windows[0][MODEL_CONTEXT_FRAMES + 49], 49);
+        assert_eq!(windows[1][0], 25);
+        assert_eq!(windows[1][MODEL_CONTEXT_FRAMES], 50);
+        assert_eq!(windows[1][MODEL_CONTEXT_FRAMES + 25], 50);
+        assert_eq!(windows[1][MODEL_WINDOW_FRAMES - 1], 50);
+    }
+
+    #[test]
+    fn rejects_misaligned_frame_buffer() {
+        let error = frame_count_from_bytes(FRAME_BYTES + 1, FRAME_BYTES).unwrap_err();
+
+        assert!(matches!(error, SegmentError::InvalidFrameBuffer { .. }));
+    }
+}
