@@ -5,11 +5,11 @@ use candle_nn::ops::sigmoid;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::model::TransNetV2;
+use crate::model::{TransNetV2, TransNetV2ForwardProfile};
 use crate::{
-    MODEL_CONTEXT_FRAMES, MODEL_INPUT_CHANNELS, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH,
-    MODEL_OUTPUT_FRAMES_PER_WINDOW, MODEL_WINDOW_FRAMES, Scene, SceneDetectionError,
-    predictions_to_scenes,
+    DEFAULT_SCENE_THRESHOLD, MODEL_CONTEXT_FRAMES, MODEL_INPUT_CHANNELS, MODEL_INPUT_HEIGHT,
+    MODEL_INPUT_WIDTH, MODEL_OUTPUT_FRAMES_PER_WINDOW, MODEL_WINDOW_FRAMES, Scene,
+    SceneDetectionError, predictions_to_scenes,
 };
 
 const FRAME_BYTES: usize = MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT * MODEL_INPUT_CHANNELS;
@@ -58,12 +58,62 @@ pub struct SegmentFramesTimings {
     pub total_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentOptions {
+    pub threshold: f32,
+    pub collect_model_profile: bool,
+}
+
+impl Default for SegmentOptions {
+    fn default() -> Self {
+        Self {
+            threshold: DEFAULT_SCENE_THRESHOLD,
+            collect_model_profile: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SegmentModelProfileSummary {
+    pub window_count: usize,
+    pub total_ms: f64,
+    pub input_cast_ms: f64,
+    pub sddcnn_ms: f64,
+    pub block_ms: Vec<f64>,
+    pub flatten_ms: f64,
+    pub frame_similarity_ms: f64,
+    pub color_histograms_ms: f64,
+    pub dense_ms: f64,
+    pub heads_ms: f64,
+}
+
+impl SegmentModelProfileSummary {
+    fn observe(&mut self, profile: &TransNetV2ForwardProfile) {
+        self.window_count += 1;
+        self.total_ms += profile.total_ms;
+        self.input_cast_ms += profile.input_cast_ms;
+        self.sddcnn_ms += profile.sddcnn_ms;
+        if self.block_ms.len() < profile.block_ms.len() {
+            self.block_ms.resize(profile.block_ms.len(), 0.0);
+        }
+        for (index, value) in profile.block_ms.iter().copied().enumerate() {
+            self.block_ms[index] += value;
+        }
+        self.flatten_ms += profile.flatten_ms;
+        self.frame_similarity_ms += profile.frame_similarity_ms;
+        self.color_histograms_ms += profile.color_histograms_ms;
+        self.dense_ms += profile.dense_ms;
+        self.heads_ms += profile.heads_ms;
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SegmentFramesReport {
     pub frame_count: usize,
     pub predictions: SegmentPredictions,
     pub scenes: Vec<Scene>,
     pub timings: SegmentFramesTimings,
+    pub model_profile: Option<SegmentModelProfileSummary>,
 }
 
 #[cfg(feature = "video-io")]
@@ -88,6 +138,7 @@ pub struct SegmentVideoReport {
     pub predictions: SegmentPredictions,
     pub scenes: Vec<Scene>,
     pub timings: SegmentVideoTimings,
+    pub model_profile: Option<SegmentModelProfileSummary>,
 }
 
 pub fn segment_frames(
@@ -98,12 +149,36 @@ pub fn segment_frames(
     device: &Device,
     threshold: f32,
 ) -> Result<SegmentFramesReport, SegmentError> {
+    segment_frames_with_options(
+        model,
+        frames_rgb24,
+        width,
+        height,
+        device,
+        SegmentOptions {
+            threshold,
+            ..SegmentOptions::default()
+        },
+    )
+}
+
+pub fn segment_frames_with_options(
+    model: &TransNetV2,
+    frames_rgb24: &[u8],
+    width: usize,
+    height: usize,
+    device: &Device,
+    options: SegmentOptions,
+) -> Result<SegmentFramesReport, SegmentError> {
     validate_frame_shape(width, height, MODEL_INPUT_CHANNELS)?;
     let frame_count = frame_count_from_bytes(frames_rgb24.len(), FRAME_BYTES)?;
     let mut single_frame = Vec::new();
     let mut many_hot = Vec::new();
     let mut windowing_ms = 0.0;
     let mut inference_ms = 0.0;
+    let mut model_profile = options
+        .collect_model_profile
+        .then(SegmentModelProfileSummary::default);
     let started_at = Instant::now();
 
     for indices in window_source_indices(frame_count)? {
@@ -123,7 +198,13 @@ pub fn segment_frames(
         windowing_ms += window_started_at.elapsed().as_secs_f64() * 1_000.0;
 
         let inference_started_at = Instant::now();
-        let output = model.forward(&input)?;
+        let output = if let Some(summary) = &mut model_profile {
+            let profiled = model.forward_profiled(&input)?;
+            summary.observe(&profiled.profile);
+            profiled.output
+        } else {
+            model.forward(&input)?
+        };
         single_frame.extend(center_probabilities(&output.single_frame_logits)?);
         many_hot.extend(center_probabilities(&output.many_hot_logits)?);
         inference_ms += inference_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -133,7 +214,7 @@ pub fn segment_frames(
     many_hot.truncate(frame_count);
 
     let postprocess_started_at = Instant::now();
-    let scenes = predictions_to_scenes(&single_frame, threshold)?;
+    let scenes = predictions_to_scenes(&single_frame, options.threshold)?;
     let postprocess_ms = postprocess_started_at.elapsed().as_secs_f64() * 1_000.0;
 
     Ok(SegmentFramesReport {
@@ -149,6 +230,7 @@ pub fn segment_frames(
             postprocess_ms,
             total_ms: started_at.elapsed().as_secs_f64() * 1_000.0,
         },
+        model_profile,
     })
 }
 
@@ -160,14 +242,34 @@ pub fn segment_video(
     threshold: f32,
     options: crate::video::DecodeSmokeOptions,
 ) -> Result<SegmentVideoReport, SegmentError> {
-    let decoded = crate::video::decode_video_rgb24(video, options)?;
-    let frame_report = segment_frames(
+    segment_video_with_options(
+        model,
+        video,
+        device,
+        options,
+        SegmentOptions {
+            threshold,
+            ..SegmentOptions::default()
+        },
+    )
+}
+
+#[cfg(feature = "video-io")]
+pub fn segment_video_with_options(
+    model: &TransNetV2,
+    video: impl AsRef<std::path::Path>,
+    device: &Device,
+    decode_options: crate::video::DecodeSmokeOptions,
+    segment_options: SegmentOptions,
+) -> Result<SegmentVideoReport, SegmentError> {
+    let decoded = crate::video::decode_video_rgb24(video, decode_options)?;
+    let frame_report = segment_frames_with_options(
         model,
         &decoded.data,
         decoded.target_width,
         decoded.target_height,
         device,
-        threshold,
+        segment_options,
     )?;
 
     Ok(SegmentVideoReport {
@@ -179,6 +281,7 @@ pub fn segment_video(
         limited_by_max_frames: decoded.limited_by_max_frames,
         predictions: frame_report.predictions,
         scenes: frame_report.scenes,
+        model_profile: frame_report.model_profile,
         timings: SegmentVideoTimings {
             decode_ms: decoded.elapsed_ms,
             windowing_ms: frame_report.timings.windowing_ms,

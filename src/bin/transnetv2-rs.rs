@@ -7,7 +7,9 @@ use candle_core::Device;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use transnetv2_rs::model::TransNetV2;
-use transnetv2_rs::segment::{SegmentPredictions, segment_video};
+use transnetv2_rs::segment::{
+    SegmentModelProfileSummary, SegmentOptions, SegmentPredictions, segment_video_with_options,
+};
 use transnetv2_rs::video::{DecodeSmokeOptions, DecodeSmokeReport, decode_smoke, inspect_video};
 use transnetv2_rs::{DEFAULT_SCENE_THRESHOLD, Scene, predictions_to_scenes};
 
@@ -62,6 +64,9 @@ enum Command {
 
         #[arg(long)]
         max_frames: Option<usize>,
+
+        #[arg(long)]
+        profile: bool,
     },
 }
 
@@ -102,8 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             threshold,
             runs,
             max_frames,
+            profile,
         } => {
-            let output = run_segment(video, weights, threshold, runs, max_frames)?;
+            let output = run_segment(video, weights, threshold, runs, max_frames, profile)?;
             match format {
                 OutputFormat::Json => print_json(&output)?,
                 OutputFormat::Txt => print_segment_text(&output)?,
@@ -168,6 +174,7 @@ fn run_segment(
     threshold: f32,
     runs: usize,
     max_frames: Option<usize>,
+    profile: bool,
 ) -> Result<SegmentCliOutput, Box<dyn std::error::Error>> {
     if runs == 0 {
         return Err("runs must be greater than zero".into());
@@ -184,7 +191,16 @@ fn run_segment(
         let load_started_at = Instant::now();
         let model = TransNetV2::load_from_safetensors(&weights, &device)?;
         let load_model_ms = load_started_at.elapsed().as_secs_f64() * 1_000.0;
-        let report = segment_video(&model, &video, &device, threshold, options)?;
+        let report = segment_video_with_options(
+            &model,
+            &video,
+            &device,
+            options,
+            SegmentOptions {
+                threshold,
+                collect_model_profile: profile,
+            },
+        )?;
         let total_ms = load_model_ms + report.timings.total_ms;
         let frames_per_second = if total_ms > 0.0 {
             report.frame_count as f64 / (total_ms / 1_000.0)
@@ -206,6 +222,7 @@ fn run_segment(
                 .into_iter()
                 .map(SceneOutput::from_scene)
                 .collect(),
+            model_profile: report.model_profile,
             timings: SegmentRunTimings {
                 load_model_ms,
                 decode_ms: report.timings.decode_ms,
@@ -411,6 +428,7 @@ struct SegmentRunOutput {
     limited_by_max_frames: bool,
     predictions: SegmentPredictions,
     scenes: Vec<SceneOutput>,
+    model_profile: Option<SegmentModelProfileSummary>,
     timings: SegmentRunTimings,
     frames_per_second: f64,
 }

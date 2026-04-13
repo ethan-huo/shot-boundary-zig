@@ -49,6 +49,11 @@ cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4
   --weights target/models/transnetv2.safetensors \
   --runs 5 \
   --format json
+cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
+  --weights target/models/transnetv2.safetensors \
+  --runs 1 \
+  --profile \
+  --format json > target/reports/rust-profile.json
 ```
 
 `decode-smoke` 也有 `bench-decode` alias。它只统计视频解码并缩放到模型输入尺寸 `48x27 RGB` 的吞吐，不能代表最终模型推理速度。真正的端到端结论使用 `segment` 和 `scripts/compare_segment_outputs.py`。

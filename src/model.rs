@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 use candle_core::{DType, Device, Result, Tensor, bail};
 use candle_nn::{
     BatchNorm, BatchNormConfig, Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, Linear, Module,
     ModuleT, VarBuilder, batch_norm, linear,
 };
+use serde::Serialize;
 
 use crate::{MODEL_INPUT_CHANNELS, ModelInputSpec};
 
@@ -57,6 +59,25 @@ pub struct TransNetV2 {
 pub struct TransNetV2Output {
     pub single_frame_logits: Tensor,
     pub many_hot_logits: Tensor,
+}
+
+#[derive(Debug)]
+pub struct TransNetV2ProfiledOutput {
+    pub output: TransNetV2Output,
+    pub profile: TransNetV2ForwardProfile,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TransNetV2ForwardProfile {
+    pub input_cast_ms: f64,
+    pub sddcnn_ms: f64,
+    pub block_ms: Vec<f64>,
+    pub flatten_ms: f64,
+    pub frame_similarity_ms: f64,
+    pub color_histograms_ms: f64,
+    pub dense_ms: f64,
+    pub heads_ms: f64,
+    pub total_ms: f64,
 }
 
 impl TransNetV2 {
@@ -117,36 +138,79 @@ impl TransNetV2 {
     }
 
     pub fn forward(&self, inputs: &Tensor) -> Result<TransNetV2Output> {
+        Ok(self.forward_inner(inputs, false)?.output)
+    }
+
+    pub fn forward_profiled(&self, inputs: &Tensor) -> Result<TransNetV2ProfiledOutput> {
+        self.forward_inner(inputs, true)
+    }
+
+    fn forward_inner(
+        &self,
+        inputs: &Tensor,
+        collect_profile: bool,
+    ) -> Result<TransNetV2ProfiledOutput> {
         validate_input_window(inputs)?;
 
+        let total_started_at = Instant::now();
+        let input_cast_started_at = Instant::now();
         let mut x = (inputs.permute((0, 4, 1, 2, 3))?.to_dtype(DType::F32)? / 255.0)?;
+        let mut profile = TransNetV2ForwardProfile {
+            input_cast_ms: elapsed_ms(input_cast_started_at),
+            block_ms: Vec::with_capacity(self.blocks.len()),
+            ..TransNetV2ForwardProfile::default()
+        };
+
         let mut block_features = Vec::with_capacity(self.blocks.len());
+        let sddcnn_started_at = Instant::now();
 
         for block in &self.blocks {
+            let block_started_at = Instant::now();
             x = block.forward(&x)?;
+            if collect_profile {
+                profile.block_ms.push(elapsed_ms(block_started_at));
+            }
             block_features.push(x.clone());
         }
+        profile.sddcnn_ms = elapsed_ms(sddcnn_started_at);
 
+        let flatten_started_at = Instant::now();
         let (batch, channels, frames, height, width) = x.dims5()?;
         let mut features =
             x.permute((0, 2, 3, 4, 1))?
                 .reshape((batch, frames, height * width * channels))?;
+        profile.flatten_ms = elapsed_ms(flatten_started_at);
 
         if let Some(frame_similarity) = &self.frame_similarity {
+            let frame_similarity_started_at = Instant::now();
             features = Tensor::cat(&[frame_similarity.forward(&block_features)?, features], 2)?;
+            profile.frame_similarity_ms = elapsed_ms(frame_similarity_started_at);
         }
 
         if let Some(color_histograms) = &self.color_histograms {
+            let color_histograms_started_at = Instant::now();
             features = Tensor::cat(&[color_histograms.forward(inputs)?, features], 2)?;
+            profile.color_histograms_ms = elapsed_ms(color_histograms_started_at);
         }
 
+        let dense_started_at = Instant::now();
         let hidden = self.fc1.forward(&features)?.relu()?;
+        profile.dense_ms = elapsed_ms(dense_started_at);
 
-        Ok(TransNetV2Output {
+        let heads_started_at = Instant::now();
+        let output = TransNetV2Output {
             single_frame_logits: self.cls_layer1.forward(&hidden)?,
             many_hot_logits: self.cls_layer2.forward(&hidden)?,
-        })
+        };
+        profile.heads_ms = elapsed_ms(heads_started_at);
+        profile.total_ms = elapsed_ms(total_started_at);
+
+        Ok(TransNetV2ProfiledOutput { output, profile })
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1_000.0
 }
 
 fn validate_config(config: TransNetV2Config) -> Result<()> {
