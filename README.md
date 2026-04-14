@@ -1,96 +1,157 @@
-# shot-boundary-zig
+# shot-boundary
 
-这个仓库现在作为 shot-boundary detection 本地实现和验收工作区。
+A fast, native CLI for video shot boundary detection. Powered by [AutoShot](https://github.com/wentaozhu/AutoShot) (CVPR 2023) with [TransNetV2](https://github.com/soCzech/TransNetV2) as an opt-in fallback.
 
-## Layout
-
-- `src/`: Zig CLI、macOS MLX-C runtime、Linux ONNX Runtime backend。
-- `assets/`: 本地验收资产。
-- `scripts/`: 模型转换/导出、Python 参考/探索输出、runtime candidate gate。
-- `docs/`: 当前 runtime 计划和 AutoShot 记录。
-- `references/`: 构建系统和依赖管理参考。
-
-## Current Decision
-
-AutoShot 是当前默认模型方向；TransNetV2 作为显式 fallback/comparison 模型保留。Linux 主线是 Zig + ONNX Runtime；macOS 主线是 Zig + MLX-C。runtime backend 由编译目标决定，模型由 `--model` 选择，默认是 `autoshot`。
-
-不要再按 `../lens/PLAN.md` 里的旧结论推进。当前方向见 `docs/PLAN.md`；构建细节见 `references/build.md`。
+- **macOS**: Zig + [MLX](https://github.com/ml-explore/mlx) (Apple Silicon GPU)
+- **Linux**: Zig + [ONNX Runtime](https://onnxruntime.ai/) (CPU; CUDA opt-in)
 
 ## Install
 
-Linux 用户可通过 curl 一键安装（自动检测架构，下载到 `~/.shot-boundary/`，symlink 到 `~/.local/bin/`）：
+### Linux (pre-built)
 
-```bash
+```sh
 curl -fsSL https://raw.githubusercontent.com/AIGC-Hackers/shot-boundary-zig/main/scripts/install.sh | sh
 ```
 
-安装指定版本：
+Installs to `~/.shot-boundary/` and symlinks the binary to `~/.local/bin/`. Supports x86_64 and aarch64.
 
-```bash
+Pin a version:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/AIGC-Hackers/shot-boundary-zig/main/scripts/install.sh | sh -s -- --version v0.1.2
 ```
 
-可通过 `SHOT_BOUNDARY_HOME` 环境变量自定义安装目录。
+Set `SHOT_BOUNDARY_HOME` to change the install directory.
 
-## Zig Commands
+### Build from source
 
-从仓库根目录运行：
+Prerequisites: [Zig 0.15.2](https://ziglang.org/download/). On macOS, CMake is also needed (MLX-C is fetched and built automatically).
 
-常规运行直接使用 Git LFS 拉下来的 artifacts。`zig build` 会把 repo 根目录 `models/` 下的 runtime artifacts 安装到 `{prefix}/models/`；`segment` 未传 `--weights` 时按编译目标和 `--model` 从 `{prefix}/models/` 加载模型（binary 位于 `{prefix}/bin/`，向上一级找到 prefix 根目录）。默认 `--model autoshot` 在 macOS 加载 `autoshot.safetensors`，在 Linux 加载 `autoshot.onnx`；macOS 可用 `--model transnetv2` 加载 `transnetv2.safetensors`。只有需要重建 AutoShot artifact 时，才从 AutoShot Google Drive/Baidu 模型文件夹下载 `ckpt_0_200_0.pth` 到 `models/`；当前验证过的 sha256 是 `3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6`。
+```sh
+git clone https://github.com/AIGC-Hackers/shot-boundary-zig.git
+cd shot-boundary-zig
+git lfs pull
+zig build -Doptimize=ReleaseFast
+```
 
-```bash
+The binary is at `zig-out/bin/shot-boundary`; model files are at `zig-out/models/`.
+
+## Usage
+
+Detect scene boundaries in a video:
+
+```sh
+shot-boundary segment video.mp4
+```
+
+Output is JSON by default. Each detected scene is a `{start, end}` frame pair:
+
+```sh
+shot-boundary segment video.mp4 --format txt
+```
+
+### Options
+
+```
+shot-boundary segment <video> [options]
+
+  --model <autoshot|transnetv2>   Model family (default: autoshot)
+  --weights <path>                Model file path (auto-resolved from install prefix)
+  --format <json|txt>             Output format (default: json)
+  --threshold <0..1>              Scene threshold (default: 0.296 for autoshot)
+  --max-frames <n>                Decode at most n frames
+  --window-batch-size <n>         Inference batch size
+  --runs <n>                      Repeat n times for benchmarking (default: 1)
+```
+
+### Other commands
+
+```sh
+shot-boundary env               # Print runtime environment (Zig version, OS, arch)
+shot-boundary decode-smoke <v>  # Benchmark raw video decode throughput
+```
+
+## Platform support
+
+| Platform | Runtime | Model format | GPU |
+|---|---|---|---|
+| macOS (Apple Silicon) | MLX-C v0.6.0 | `.safetensors` | Metal (via MLX) |
+| Linux x86_64 | ONNX Runtime 1.24.4 | `.onnx` | CUDA (opt-in) |
+| Linux aarch64 | ONNX Runtime 1.24.4 | `.onnx` | - |
+
+Enable CUDA on Linux:
+
+```sh
+zig build -Doptimize=ReleaseFast -Donnxruntime-cuda=true
+```
+
+## Model
+
+The default model is **AutoShot@F1** (Zhu et al., CVPR 2023), a NAS-derived architecture that improves on TransNetV2 in both accuracy (+4.2% F1 on the SHOT dataset) and efficiency (37 vs 41 GMACs). It holds the top position on the PapersWithCode shot boundary detection leaderboard.
+
+Input spec: 100-frame sliding windows at 48x27 RGB. Output: per-frame `single_frame` and `many_hot` sigmoid scores; frames above the threshold mark shot boundaries.
+
+**TransNetV2** is available as a fallback via `--model transnetv2` (default threshold: 0.02).
+
+## Project layout
+
+```
+src/            Zig CLI, video decoder, MLX and ONNX Runtime backends
+models/         Pre-exported model artifacts (Git LFS)
+scripts/        Model export, Python reference inference, runtime evaluation gate
+docs/           AutoShot architecture reference
+```
+
+## Development
+
+### Tests
+
+```sh
+zig build test   # unit tests + format check + lint
+```
+
+### Re-exporting model artifacts
+
+This is only needed when rebuilding from the upstream PyTorch checkpoint. Download `ckpt_0_200_0.pth` (sha256: `3e85290546...a6`) from the AutoShot model repository into `models/`, then:
+
+```sh
 mkdir -p .scratch
 git clone --depth 1 https://github.com/wentaozhu/AutoShot .scratch/autoshot
 
+# ONNX (Linux)
 uv run --with torch --with einops --with numpy --with onnx --with onnxruntime --with packaging \
   scripts/export_autoshot_onnx.py \
   --upstream .scratch/autoshot \
   --checkpoint models/ckpt_0_200_0.pth \
   --output models/autoshot.onnx
 
+# safetensors (macOS)
 uv run --with torch --with einops --with numpy --with safetensors --with packaging \
   scripts/export_autoshot_safetensors.py \
   --upstream .scratch/autoshot \
   --checkpoint models/ckpt_0_200_0.pth \
   --output models/autoshot.safetensors
-
-# Linux:
-zig build -Doptimize=ReleaseFast run -- segment assets/333.mp4 \
-  --runs 3 \
-  --max-frames 20 \
-  --format json > target/zig-onnx-cpu-segment-runs3-max20.json
-
-# macOS:
-zig build -Doptimize=ReleaseFast run -- segment assets/333.mp4 \
-  --runs 3 \
-  --max-frames 20 \
-  --format json > target/zig-mlx-segment-runs3-max20.json
-
-# macOS TransNetV2 fallback:
-zig build -Doptimize=ReleaseFast run -- segment assets/333.mp4 \
-  --model transnetv2 \
-  --runs 3 \
-  --max-frames 20 \
-  --format json > target/zig-mlx-transnetv2-runs3-max20.json
 ```
 
-runtime gate 用 `--baseline` 表示当前已接受的平台实现输出。Linux ONNX 和 macOS MLX 复用同一份 JSON contract。
+### Runtime evaluation gate
 
-```bash
+Validate a Zig build against the Python reference:
+
+```sh
 uv run --with torch --with einops --with numpy --with safetensors --with packaging \
   scripts/run_autoshot_reference.py \
   --upstream .scratch/autoshot \
   --weights models/autoshot.safetensors \
   --video assets/333.mp4 \
   --max-frames 20 \
-  --output target/autoshot-python-reference-max20.json
+  --output target/reference.json
 
 uv run scripts/evaluate_runtime_candidate.py \
-  --python target/autoshot-python-reference-max20.json \
-  --baseline target/autoshot-python-reference-max20.json \
-  --candidate target/zig-mlx-segment-runs3-max20.json \
-  --candidate-name zig-mlx-autoshot-max20-runs3 \
+  --python target/reference.json \
+  --baseline target/reference.json \
+  --candidate target/candidate.json \
+  --candidate-name zig-mlx \
   --require-python-fps \
-  --output-json target/runtime-candidate-zig-mlx-max20-runs3.json \
-  --output-md target/runtime-candidate-zig-mlx-max20-runs3.md
+  --output-json target/gate-result.json \
+  --output-md target/gate-result.md
 ```
