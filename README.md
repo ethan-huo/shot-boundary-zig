@@ -16,11 +16,27 @@ AutoShot 是当前默认模型方向；TransNetV2 作为显式 fallback/comparis
 
 不要再按 `../lens/PLAN.md` 里的旧结论推进。当前方向见 `docs/PLAN.md`；构建细节见 `references/build.md`。
 
+## Install
+
+Linux 用户可通过 curl 一键安装（自动检测架构，下载到 `~/.shot-boundary/`，symlink 到 `~/.local/bin/`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AIGC-Hackers/shot-boundary-zig/main/scripts/install.sh | sh
+```
+
+安装指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AIGC-Hackers/shot-boundary-zig/main/scripts/install.sh | sh -s -- --version v0.1.2
+```
+
+可通过 `SHOT_BOUNDARY_HOME` 环境变量自定义安装目录。
+
 ## Zig Commands
 
 从仓库根目录运行：
 
-常规运行直接使用 Git LFS 拉下来的 artifacts。`zig build` 会把 repo 根目录 `models/` 下的 runtime artifacts 安装到 `{bin_dir}/models/`；`segment` 未传 `--weights` 时按编译目标和 `--model` 从这个目录加载模型。默认 `--model autoshot` 在 macOS 加载 `autoshot.safetensors`，在 Linux 加载 `autoshot.onnx`；macOS 可用 `--model transnetv2` 加载 `transnetv2.safetensors`。只有需要重建 AutoShot artifact 时，才从 AutoShot Google Drive/Baidu 模型文件夹下载 `ckpt_0_200_0.pth` 到 `models/`；当前验证过的 sha256 是 `3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6`。
+常规运行直接使用 Git LFS 拉下来的 artifacts。`zig build` 会把 repo 根目录 `models/` 下的 runtime artifacts 安装到 `{prefix}/models/`；`segment` 未传 `--weights` 时按编译目标和 `--model` 从 `{prefix}/models/` 加载模型（binary 位于 `{prefix}/bin/`，向上一级找到 prefix 根目录）。默认 `--model autoshot` 在 macOS 加载 `autoshot.safetensors`，在 Linux 加载 `autoshot.onnx`；macOS 可用 `--model transnetv2` 加载 `transnetv2.safetensors`。只有需要重建 AutoShot artifact 时，才从 AutoShot Google Drive/Baidu 模型文件夹下载 `ckpt_0_200_0.pth` 到 `models/`；当前验证过的 sha256 是 `3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6`。
 
 ```bash
 mkdir -p .scratch

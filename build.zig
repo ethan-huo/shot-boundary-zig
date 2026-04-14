@@ -137,14 +137,14 @@ fn installModelArtifacts(b: *std.Build, target_os: std.Target.Os.Tag) void {
 fn installModelFile(b: *std.Build, filename: []const u8) void {
     b.installFile(
         b.pathJoin(&.{ "models", filename }),
-        b.pathJoin(&.{ "bin", "models", filename }),
+        b.pathJoin(&.{ "models", filename }),
     );
 }
 
 fn installModelFileIfPresent(b: *std.Build, filename: []const u8) void {
     const source = b.pathJoin(&.{ "models", filename });
     std.fs.cwd().access(source, .{}) catch return;
-    b.installFile(source, b.pathJoin(&.{ "bin", "models", filename }));
+    b.installFile(source, b.pathJoin(&.{ "models", filename }));
 }
 
 const PlatformRuntime = union(enum) {

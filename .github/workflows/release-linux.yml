@@ -59,6 +59,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.2
 
+      - name: Fetch model artifacts
+        run: git lfs pull --include="models/autoshot.onnx"
+
       - name: Install Zig
         run: |
           mkdir -p .local/zig
@@ -108,9 +111,10 @@ jobs:
           ORT_DIR: ${{ matrix.ort_dir }}
         run: |
           package_dir="dist/${PACKAGE_NAME}"
-          mkdir -p "${package_dir}/bin" "${package_dir}/lib" "${package_dir}/third_party/onnxruntime"
+          mkdir -p "${package_dir}/bin" "${package_dir}/lib" "${package_dir}/models" "${package_dir}/third_party/onnxruntime"
 
           cp "zig-out/${ARCH_LABEL}/bin/shot-boundary" "${package_dir}/bin/"
+          cp models/autoshot.onnx "${package_dir}/models/"
           cp -P externals/onnxruntime/"${ORT_DIR}"/lib/libonnxruntime.so* "${package_dir}/lib/"
           cp -P externals/onnxruntime/"${ORT_DIR}"/lib/libonnxruntime_providers_shared.so "${package_dir}/lib/"
           cp externals/onnxruntime/"${ORT_DIR}"/LICENSE \

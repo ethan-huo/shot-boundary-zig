@@ -24,7 +24,7 @@ const usage =
     \\
     \\segment options:
     \\  --model <autoshot|transnetv2> optional model family, default autoshot
-    \\  --weights <path>             optional model path; default {bin_dir}/models/<model>.* for target OS
+    \\  --weights <path>             optional model path; auto-resolved from install prefix
     \\  --format <json|txt>          output format, default json
     \\  --threshold <0..1>           scene threshold, default depends on model
     \\  --runs <n>                   run count, must be > 0, default 1
@@ -494,7 +494,9 @@ fn defaultModelFilename(model: SegmentModel) []const u8 {
 fn defaultModelPath(allocator: std.mem.Allocator, model: SegmentModel) ![]const u8 {
     const exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
     defer allocator.free(exe_dir);
-    return std.fs.path.join(allocator, &.{ exe_dir, "models", defaultModelFilename(model) });
+    // Binary lives at {prefix}/bin/; models live at {prefix}/models/.
+    const prefix_dir = std.fs.path.dirname(exe_dir) orelse exe_dir;
+    return std.fs.path.join(allocator, &.{ prefix_dir, "models", defaultModelFilename(model) });
 }
 
 fn runSegment(allocator: std.mem.Allocator, options: SegmentOptions) !void {
