@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     const runtime_impl = createRuntimeModule(b, target, optimize, platform_runtime, spec_module, runtime_options);
 
     const exe = b.addExecutable(.{
-        .name = "transnetv2_zig",
+        .name = "shot_boundary_zig",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,

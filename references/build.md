@@ -57,7 +57,7 @@ Each external stage has an artifact guard:
 ### Dependency chain
 
 ```
-transnetv2_zig (Zig legacy binary name) -> MLX-C v0.6.0 (C++, CMake) -> MLX v0.31.1
+shot_boundary_zig (Zig CLI) -> MLX-C v0.6.0 (C++, CMake) -> MLX v0.31.1
 ```
 
 ### Overriding with pre-built MLX-C
@@ -91,7 +91,7 @@ GitHub Actions builds Linux CLI release archives for:
 - `x86_64-linux-gnu`
 - `aarch64-linux-gnu`
 
-The release archive includes `bin/transnetv2_zig`, ONNX Runtime shared libraries under `lib/`, and ONNX Runtime notices under `third_party/onnxruntime/`. The executable is linked with `$ORIGIN/../lib` rpath so the bundled libraries are found after unpacking.
+The release archive includes `bin/shot_boundary_zig`, ONNX Runtime shared libraries under `lib/`, and ONNX Runtime notices under `third_party/onnxruntime/`. The executable is linked with `$ORIGIN/../lib` rpath so the bundled libraries are found after unpacking.
 
 Versioning is tag-first:
 - Pushing a tag like `v0.1.0` builds both Linux archives and publishes a GitHub Release with those assets.

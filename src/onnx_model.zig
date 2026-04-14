@@ -48,7 +48,7 @@ pub const TransNetV2 = struct {
         try validateApi(api);
 
         var env: ?*c.OrtEnv = null;
-        try check(api, api.CreateEnv.?(c.ORT_LOGGING_LEVEL_WARNING, "transnetv2_zig", &env), "CreateEnv");
+        try check(api, api.CreateEnv.?(c.ORT_LOGGING_LEVEL_WARNING, "shot_boundary_zig", &env), "CreateEnv");
         errdefer api.ReleaseEnv.?(env);
 
         var session_options: ?*c.OrtSessionOptions = null;
