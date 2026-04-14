@@ -1,4 +1,4 @@
-# transnetv2
+# shot-boundary-zig
 
 这个仓库现在作为 TransNetV2 本地实现和验收工作区，不再默认等同于 Rust crate。
 
