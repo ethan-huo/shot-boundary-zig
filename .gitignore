@@ -1,4 +1,5 @@
 /target
+/rust/target
 /.scratch
 __pycache__/
 *.py[cod]

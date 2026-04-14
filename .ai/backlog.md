@@ -6,3 +6,4 @@
 - 2026-04-13: Reaching TensorFlow-class speed likely needs a fused fixed-shape SDDCNN kernel or an alternative backend. Any candidate must emit the normalized segment JSON and pass `scripts/evaluate_runtime_candidate.py --require-python-fps` before replacing the default Candle path.
 - 2026-04-14: macOS MLX via `mlx-rs` now passes the TensorFlow correctness/performance gate, but MLX does not yet expose Candle-style internal model profile fields in the CLI. Keep `--profile` Candle-only until MLX stage timings are modeled separately.
 - 2026-04-14: Linux CPU/CUDA remains unevaluated. Do not assume the macOS MLX result transfers; rerun the same runtime candidate gate on Linux before choosing ORT/CUDA/TensorRT/libtorch or another backend.
+- 2026-04-14: Zig spike is pending. Keep the Rust implementation as the verified baseline until Zig emits the same segment JSON and passes the shared Python/Rust candidate gate.

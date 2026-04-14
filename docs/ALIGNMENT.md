@@ -32,7 +32,7 @@ uv run --with tensorflow==2.16.2 --with numpy \
 ## 3. 运行 Rust MLX 版本
 
 ```bash
-cargo run --release --features cli-mlx --bin transnetv2-rs -- segment assets/333.mp4 \
+cargo run --manifest-path rust/Cargo.toml --release --features cli-mlx --bin transnetv2-rs -- segment assets/333.mp4 \
   --weights target/models/transnetv2.safetensors \
   --backend mlx \
   --runs 5 \
@@ -46,7 +46,7 @@ MLX 作为候选后端必须同时超过 Candle baseline 和官方 TensorFlow Py
 如果还没有 Candle baseline，先生成一次：
 
 ```bash
-cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
+cargo run --manifest-path rust/Cargo.toml --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
   --weights target/models/transnetv2.safetensors \
   --backend candle \
   --runs 5 \

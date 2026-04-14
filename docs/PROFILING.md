@@ -7,7 +7,7 @@
 ## 命令
 
 ```bash
-cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
+cargo run --manifest-path rust/Cargo.toml --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
   --weights target/models/transnetv2.safetensors \
   --runs 1 \
   --profile \
@@ -19,7 +19,7 @@ cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4
 可实验性地批量执行多个 windows：
 
 ```bash
-cargo run --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
+cargo run --manifest-path rust/Cargo.toml --release --features cli --bin transnetv2-rs -- segment assets/333.mp4 \
   --weights target/models/transnetv2.safetensors \
   --runs 1 \
   --window-batch-size 2 \

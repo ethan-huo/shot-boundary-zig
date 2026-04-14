@@ -32,8 +32,8 @@ mp4 -> ffmpeg command -> RGB24 -> resize to 48x27 -> FNV-1a checksum
 ## 命令
 
 ```bash
-cargo run --features cli --bin transnetv2-rs -- inspect assets/333.mp4
-cargo run --release --features cli --bin transnetv2-rs -- decode-smoke assets/333.mp4 --runs 3
+cargo run --manifest-path rust/Cargo.toml --features cli --bin transnetv2-rs -- inspect assets/333.mp4
+cargo run --manifest-path rust/Cargo.toml --release --features cli --bin transnetv2-rs -- decode-smoke assets/333.mp4 --runs 3
 ```
 
 ## Release 基线

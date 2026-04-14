@@ -2,7 +2,7 @@
 name = "transnetv2-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Rust-first TransNetV2 shot-boundary detection library."
+description = "Rust TransNetV2 shot-boundary detection baseline."
 publish = false
 
 [dependencies]
