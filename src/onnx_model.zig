@@ -1,4 +1,4 @@
-//! ONNX Runtime TransNetV2 model edge.
+//! ONNX Runtime AutoShot/TransNetV2-compatible model edge.
 
 const std = @import("std");
 const runtime_options = @import("runtime_options");

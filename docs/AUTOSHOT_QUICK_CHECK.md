@@ -70,8 +70,8 @@ The current `target/models/transnetv2.onnx` failed under Python ONNX Runtime wit
 
 ## Decision
 
-AutoShot accuracy is confirmed higher, but speed is not confirmed higher on the current CPU ONNX backend. For the original goal, this is a mixed result:
+AutoShot accuracy is confirmed higher, but speed is not confirmed higher on the current CPU ONNX backend. We are proceeding with the full implementation because the accuracy gain is the deciding factor:
 
-- Proceed if the primary goal is accuracy.
+- Proceed with AutoShot as the default model direction.
 - Do not switch solely on the expectation that AutoShot is faster in our ONNX Runtime CPU path.
 - Before a full transition, rerun speed on the intended release hardware and optionally test ORT graph optimization / CUDA separately.

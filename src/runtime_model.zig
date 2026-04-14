@@ -1,4 +1,4 @@
-//! Platform-selected TransNetV2 model edge.
+//! Platform-selected shot-boundary model edge.
 
 const runtime_model_impl = @import("runtime_model_impl");
 

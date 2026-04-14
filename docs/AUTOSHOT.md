@@ -140,19 +140,13 @@ similarities = torch.gather(similarities_padded, 2, lookup_indices)
 
 AutoShot 仍使用 100 帧窗口、25 帧上下文、中心 50 帧输出、48x27 RGB 输入。`segment_core.windowSourceIndices`, `runtime_segment.buildWindowBatch`, ffmpeg decode 都可以复用。
 
-**CLI default threshold: 中等影响。**
+**CLI default threshold: 已切换。**
 
-当前默认阈值是 `0.5`; AutoShot 上游 SHOT F1 最优阈值记录为 `0.296`。如果只是手动使用 AutoShot ONNX, 可以要求 `--threshold 0.296`。如果要把 AutoShot 做成默认模型, 需要决定是否:
-
-- 改全局默认阈值, 这会影响 TransNetV2;
-- 增加 model manifest/metadata, 根据模型类型选择默认阈值;
-- 保持 CLI 默认不变, 在文档和 release artifact 中明确 AutoShot 推荐阈值。
-
-建议不要悄悄改全局默认值; 下一步先要求显式传 `--threshold 0.296`, 等 AutoShot correctness gate 稳定后再考虑 manifest。
+AutoShot 上游 SHOT F1 最优阈值记录为 `0.296`。在决定以精度收益推进完整迁移后, CLI 全局默认阈值已切到 `0.296`。如果使用历史 TransNetV2 模型做对比, 需要显式传 `--threshold 0.5` 或该模型对应的阈值。
 
 **模型资产/导出脚本: 高影响, 是主工作量。**
 
-需要新增 `scripts/export_autoshot_onnx.py`, 职责包括:
+已新增 `scripts/export_autoshot_onnx.py`, 职责包括:
 
 - 加载上游 `TransNetV2Supernet`
 - 加载 `ckpt_0_200_0.pth` 中的 `pretrained_dict["net"]`
@@ -173,8 +167,6 @@ AutoShot 仍使用 100 帧窗口、25 帧上下文、中心 50 帧输出、48x27
 
 ### 推荐下一步
 
-1. 获取并固定 `ckpt_0_200_0.pth` 的来源和 checksum。
-2. 新增 `scripts/export_autoshot_onnx.py`, 先只支持 AutoShot@F1 架构。
-3. 导出 ONNX 时强制跑 batch=1/2/3 ORT smoke, 防止 dynamic batch 退化。
-4. 用 `assets/333.mp4 --threshold 0.296 --window-batch-size 2` 跑 Zig ONNX segment。
-5. 新增 AutoShot reference JSON 和 candidate gate, 通过后再讨论是否把 AutoShot 设为 Linux 默认模型。
+1. 用 `scripts/export_autoshot_onnx.py` 导出并固定 release 用 ONNX artifact。
+2. 用 `assets/333.mp4 --window-batch-size 2` 跑 Zig ONNX segment smoke。
+3. 后续如要追速度, 再单独评估 ORT graph optimization / CUDA, 不阻塞 AutoShot 精度迁移。

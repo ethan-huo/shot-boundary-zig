@@ -1,4 +1,4 @@
-//! Shared TransNetV2 model dimensions.
+//! Shared AutoShot/TransNetV2-compatible model dimensions.
 
 pub const input_width: usize = 48;
 pub const input_height: usize = 27;
@@ -6,7 +6,7 @@ pub const input_channels: usize = 3;
 pub const window_frames: usize = 100;
 pub const context_frames: usize = 25;
 pub const output_frames_per_window: usize = 50;
-pub const default_scene_threshold: f32 = 0.5;
+pub const default_scene_threshold: f32 = 0.296;
 
 pub const ModelInputSpec = struct {
     width: usize = input_width,

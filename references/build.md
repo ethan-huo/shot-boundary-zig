@@ -36,7 +36,7 @@ To point at a prebuilt ORT prefix:
 zig build -Donnxruntime-prefix=/path/to/onnxruntime
 ```
 
-CUDA EP is intentionally not part of the default Linux target because it currently fails the prediction gate for the exported TransNetV2 graph. To opt into the x86_64 CUDA EP while investigating CUDA graph differences:
+CUDA EP is intentionally not part of the default Linux target. To opt into the x86_64 CUDA EP while investigating CUDA graph differences:
 
 ```bash
 zig build -Doptimize=ReleaseFast -Donnxruntime-cuda=true
@@ -57,7 +57,7 @@ Each external stage has an artifact guard:
 ### Dependency chain
 
 ```
-transnetv2_zig (Zig) -> MLX-C v0.6.0 (C++, CMake) -> MLX v0.31.1
+transnetv2_zig (Zig legacy binary name) -> MLX-C v0.6.0 (C++, CMake) -> MLX v0.31.1
 ```
 
 ### Overriding with pre-built MLX-C

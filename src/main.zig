@@ -24,7 +24,7 @@ const usage =
     \\segment options:
     \\  --weights <path>             required platform model path (.onnx on Linux, safetensors on macOS)
     \\  --format <json|txt>          output format, default json
-    \\  --threshold <0..1>           scene threshold, default 0.5
+    \\  --threshold <0..1>           scene threshold, default 0.296
     \\  --runs <n>                   run count, must be > 0, default 1
     \\  --max-frames <n>             optional decode limit, must be > 0
     \\  --window-batch-size <n>      optional inference batch size, must be > 0
