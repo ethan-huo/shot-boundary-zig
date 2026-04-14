@@ -1,4 +1,4 @@
-//! ONNX Runtime AutoShot/TransNetV2-compatible model edge.
+//! ONNX Runtime shot-boundary model edge.
 
 const std = @import("std");
 const runtime_options = @import("runtime_options");
@@ -37,13 +37,13 @@ pub const Predictions = struct {
     }
 };
 
-pub const TransNetV2 = struct {
+pub const AutoShot = struct {
     api: *const c.OrtApi,
     env: *c.OrtEnv,
     session: *c.OrtSession,
     memory_info: *c.OrtMemoryInfo,
 
-    pub fn load(allocator: std.mem.Allocator, path: []const u8) !TransNetV2 {
+    pub fn load(allocator: std.mem.Allocator, path: []const u8) !AutoShot {
         const api = getApi() orelse return error.OrtApiUnavailable;
         try validateApi(api);
 
@@ -92,7 +92,7 @@ pub const TransNetV2 = struct {
         };
     }
 
-    pub fn deinit(self: *TransNetV2) void {
+    pub fn deinit(self: *AutoShot) void {
         self.api.ReleaseMemoryInfo.?(self.memory_info);
         self.api.ReleaseSession.?(self.session);
         self.api.ReleaseEnv.?(self.env);
@@ -100,7 +100,7 @@ pub const TransNetV2 = struct {
     }
 
     pub fn predictBatch(
-        self: *const TransNetV2,
+        self: *const AutoShot,
         allocator: std.mem.Allocator,
         window_batch_rgb24: []const u8,
         batch_size: usize,
@@ -198,6 +198,8 @@ pub const TransNetV2 = struct {
         return .{ .single_frame = single_frame, .many_hot = many_hot };
     }
 };
+
+pub const TransNetV2 = AutoShot;
 
 fn getApi() ?*const c.OrtApi {
     const base = c.OrtGetApiBase();
@@ -298,38 +300,6 @@ fn validateTensor(
     var rank: usize = 0;
     try check(api, api.GetDimensionsCount.?(tensor_info, &rank), "GetDimensionsCount");
     if (rank != expected_rank) return error.InvalidRank;
-}
-
-fn copyOutputFlat(
-    allocator: std.mem.Allocator,
-    api: *const c.OrtApi,
-    value: *c.OrtValue,
-    expected_len: usize,
-) ![]f32 {
-    var tensor_info: ?*c.OrtTensorTypeAndShapeInfo = null;
-    try check(api, api.GetTensorTypeAndShape.?(value, &tensor_info), "GetTensorTypeAndShape");
-    defer api.ReleaseTensorTypeAndShapeInfo.?(tensor_info);
-
-    var dtype: c.ONNXTensorElementDataType = undefined;
-    try check(api, api.GetTensorElementType.?(tensor_info, &dtype), "GetTensorElementType");
-    if (dtype != c.ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) return error.InvalidDtype;
-
-    var rank: usize = 0;
-    try check(api, api.GetDimensionsCount.?(tensor_info, &rank), "GetDimensionsCount");
-    if (rank != 2) return error.InvalidRank;
-
-    var dims: [2]i64 = undefined;
-    try check(api, api.GetDimensions.?(tensor_info, &dims, dims.len), "GetDimensions");
-    if (dims[1] != spec.output_frames_per_window) return error.InvalidShape;
-
-    var element_count: usize = 0;
-    try check(api, api.GetTensorShapeElementCount.?(tensor_info, &element_count), "GetTensorShapeElementCount");
-    if (element_count != expected_len) return error.InvalidShape;
-
-    var data: ?*anyopaque = null;
-    try check(api, api.GetTensorMutableData.?(value, &data), "GetTensorMutableData");
-    const ptr: [*]const f32 = @ptrCast(@alignCast(data orelse return error.NullData));
-    return allocator.dupe(f32, ptr[0..element_count]);
 }
 
 fn check(api: *const c.OrtApi, status: ?*c.OrtStatus, context: []const u8) OnnxModelError!void {

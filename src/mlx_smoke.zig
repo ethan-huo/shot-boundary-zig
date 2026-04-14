@@ -10,7 +10,6 @@ pub fn main() !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
-    defer stdout.flush() catch {};
 
     var version = c.mlx_string_new();
     defer _ = c.mlx_string_free(version);
@@ -55,6 +54,7 @@ pub fn main() !void {
         gpu_count,
         std.mem.span(c.mlx_string_data(rendered)),
     });
+    try stdout.flush();
 }
 
 fn check(rc: c_int, context: []const u8) MlxError!void {

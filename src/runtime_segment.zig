@@ -2,9 +2,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const runtime_model = @import("runtime_model.zig");
 const segment_core = @import("segment_core.zig");
 const spec = @import("spec");
+const time_util = @import("time_util.zig");
 
 pub const default_window_batch_size: usize = switch (builtin.target.os.tag) {
     .macos => 2,
@@ -47,7 +47,7 @@ pub const SegmentFramesReport = struct {
 
 pub fn segmentFrames(
     allocator: std.mem.Allocator,
-    model: *const runtime_model.TransNetV2,
+    model: anytype,
     frames_rgb24: []const u8,
     options: SegmentOptions,
 ) !SegmentFramesReport {
@@ -75,14 +75,14 @@ pub fn segmentFrames(
         const window_started_at = try std.time.Instant.now();
         const window_data = try buildWindowBatch(allocator, frames_rgb24, batch);
         defer allocator.free(window_data);
-        windowing_ms += elapsedMs(window_started_at);
+        windowing_ms += time_util.elapsedMs(window_started_at);
 
         const inference_started_at = try std.time.Instant.now();
         const predictions = try model.predictBatch(allocator, window_data, batch.len);
         defer predictions.deinit(allocator);
         try single_frame.appendSlice(allocator, predictions.single_frame);
         try many_hot.appendSlice(allocator, predictions.many_hot);
-        inference_ms += elapsedMs(inference_started_at);
+        inference_ms += time_util.elapsedMs(inference_started_at);
 
         window_index = batch_end;
     }
@@ -93,7 +93,7 @@ pub fn segmentFrames(
     const postprocess_started_at = try std.time.Instant.now();
     const scenes = try segment_core.predictionsToScenes(allocator, single_frame.items, options.threshold);
     errdefer allocator.free(scenes);
-    const postprocess_ms = elapsedMs(postprocess_started_at);
+    const postprocess_ms = time_util.elapsedMs(postprocess_started_at);
 
     const single_frame_output = try single_frame.toOwnedSlice(allocator);
     errdefer allocator.free(single_frame_output);
@@ -111,7 +111,7 @@ pub fn segmentFrames(
             .windowing_ms = windowing_ms,
             .inference_ms = inference_ms,
             .postprocess_ms = postprocess_ms,
-            .total_ms = elapsedMs(started_at),
+            .total_ms = time_util.elapsedMs(started_at),
         },
     };
 }
@@ -133,9 +133,4 @@ fn buildWindowBatch(
         }
     }
     return output;
-}
-
-fn elapsedMs(started_at: std.time.Instant) f64 {
-    const now = std.time.Instant.now() catch unreachable;
-    return @as(f64, @floatFromInt(now.since(started_at))) / std.time.ns_per_ms;
 }

@@ -8,10 +8,10 @@ This is the fast decision check for whether AutoShot should replace the current 
 
 - AutoShot upstream shallow clone: `/tmp/autoshot-codex`
 - Upstream commit: `77c82ff826a9301bb173d9be786297a49d73d081`
-- Checkpoint: `target/models/ckpt_0_200_0.pth`
+- Checkpoint: `models/ckpt_0_200_0.pth`
 - Checkpoint sha256: `3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6`
-- Exported ONNX: `target/models/autoshot.onnx`
-- Current baseline ONNX: `target/models/transnetv2.onnx`
+- Exported ONNX: `models/autoshot.onnx`
+- Historical baseline ONNX used for this check: `models/transnetv2.onnx`
 - Local speed sample: `assets/333.mp4`
 
 The checkpoint loads cleanly into `TransNetV2Supernet`:
@@ -66,7 +66,7 @@ AutoShot-only batch size 2 on the same 8 windows was slower:
 |---|---:|---:|---:|
 | AutoShot ONNX | 2 | 3965.192 | 100.878 |
 
-The current `target/models/transnetv2.onnx` failed under Python ONNX Runtime with batch size 2 in `ScatterElements`, so the directly comparable speed number is batch size 1.
+The TransNetV2 ONNX artifact used for this check failed under Python ONNX Runtime with batch size 2 in `ScatterElements`, so the directly comparable speed number is batch size 1. That ONNX artifact is not committed in the current checkout; only `models/transnetv2.safetensors` is present.
 
 ### Linux 2 vCPU-like Check
 

@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
     if (runtimeBuildStep(platform_runtime)) |s| exe.step.dependOn(s);
 
     b.installArtifact(exe);
+    installModelArtifacts(b, target_os);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -117,6 +118,33 @@ pub fn build(b: *std.Build) void {
         .ort => |ort| if (ort.build_step) |s| setup_step.dependOn(s),
         .unsupported => {},
     }
+}
+
+fn installModelArtifacts(b: *std.Build, target_os: std.Target.Os.Tag) void {
+    switch (target_os) {
+        .macos => {
+            installModelFile(b, "autoshot.safetensors");
+            installModelFile(b, "transnetv2.safetensors");
+        },
+        .linux => {
+            installModelFile(b, "autoshot.onnx");
+            installModelFileIfPresent(b, "transnetv2.onnx");
+        },
+        else => {},
+    }
+}
+
+fn installModelFile(b: *std.Build, filename: []const u8) void {
+    b.installFile(
+        b.pathJoin(&.{ "models", filename }),
+        b.pathJoin(&.{ "bin", "models", filename }),
+    );
+}
+
+fn installModelFileIfPresent(b: *std.Build, filename: []const u8) void {
+    const source = b.pathJoin(&.{ "models", filename });
+    std.fs.cwd().access(source, .{}) catch return;
+    b.installFile(source, b.pathJoin(&.{ "bin", "models", filename }));
 }
 
 const PlatformRuntime = union(enum) {

@@ -22,6 +22,15 @@ The runtime is selected by compile target:
 
 There is no CLI backend flag.
 
+By default `segment <video>` loads the selected model from `{bin_dir}/models/`, where `{bin_dir}` is the directory containing the running `shot-boundary` executable. `--model` defaults to `autoshot`; `--weights <path>` overrides the resolved path.
+
+| Target OS | `--model autoshot` | `--model transnetv2` |
+|-----------|--------------------|----------------------|
+| macOS | `{bin_dir}/models/autoshot.safetensors` | `{bin_dir}/models/transnetv2.safetensors` |
+| Linux | `{bin_dir}/models/autoshot.onnx` | `{bin_dir}/models/transnetv2.onnx` |
+
+Model binaries under repo-root `models/` are tracked with Git LFS and installed under `bin/models/` by `zig build`. Current checkout has macOS TransNetV2 parity only; `models/transnetv2.onnx` still needs to be regenerated before Linux can use that default path.
+
 ## Linux ONNX Runtime
 
 Linux builds use ONNX Runtime v1.24.4. By default the build downloads the CPU package for the target architecture into gitignored `externals/onnxruntime/`; currently `x86_64` and `aarch64` Linux CPU packages are wired.

@@ -69,12 +69,15 @@ Block 6: n_layer=0
 - 窗口滑动 / 场景后处理 / ffmpeg 解码
 - correctness gate 框架
 
-### 需要新增
+### MLX-C 迁移状态
 
-1. **DDCNNV2A block 变体**: 多个膨胀分支共享一个 2D 空间卷积, 时序 1D conv 各自独立。约 30 行代码。
-2. **n_dilation=5 支持**: 现有硬编码 `[1,2,4,8]`, 加一个 `dilation=16` 分支。
-3. **可配置层拓扑**: 从固定 `3层×2blocks` 改为 6 个独立配置的 block, 每个指定类型和参数。
-4. **权重导出脚本**: `export_autoshot_safetensors.py`, 从 PyTorch checkpoint 导出, 命名规则对齐现有 safetensors 格式。
+已完成:
+
+1. **DDCNNV2A block 变体**: 多个膨胀分支共享一个 2D 空间卷积, 时序 1D conv 各自独立。
+2. **n_dilation=5 支持**: 支持 `[1,2,4,8,16]`。
+3. **可配置层拓扑**: 从固定 `3层×2blocks` 改为 AutoShot@F1 的 6 个独立 layer。
+4. **权重导出脚本**: `scripts/export_autoshot_safetensors.py`, 从 PyTorch checkpoint 导出 macOS MLX-C 使用的 safetensors。
+5. **reference gate**: `scripts/run_autoshot_reference.py` 可生成 AutoShot PyTorch reference JSON。
 
 ### 风险点
 
@@ -84,7 +87,7 @@ Block 6: n_layer=0
 
 ## ONNX backend 可行性评估
 
-结论: **可行, 且建议优先走 ONNX 导出路径**, 不建议先在 Zig/MLX 侧手写 AutoShot 算子。
+结论: **可行**。历史上优先走 ONNX 导出路径以降低 Linux runtime 风险；macOS MLX-C 现在也已迁到 AutoShot@F1。
 
 当前 Linux ONNX backend 的 runtime contract 已经足够小:
 
@@ -134,7 +137,7 @@ similarities = torch.gather(similarities_padded, 2, lookup_indices)
 
 **Zig ONNX runtime: 低影响。**
 
-如果 `export_autoshot_onnx.py` 保持现有 ABI, `src/onnx_model.zig` 的输入名、输出名、dtype、rank、预分配输出 buffer 都可以复用。最多需要做命名层面的清理, 例如把 `TransNetV2` 类型名泛化成 `RuntimeModel`, 但这不是功能必需项。
+`export_autoshot_onnx.py` 保持现有 ABI, `src/onnx_model.zig` 的输入名、输出名、dtype、rank、预分配输出 buffer 都可以复用。Zig runtime 已把默认模型边界命名为 `AutoShot`，同时保留显式 `TransNetV2` fallback 类型，避免把默认路线误表述成历史模型。
 
 **decode/windowing/postprocess: 低影响。**
 
@@ -142,11 +145,11 @@ AutoShot 仍使用 100 帧窗口、25 帧上下文、中心 50 帧输出、48x27
 
 **CLI default threshold: 已切换。**
 
-AutoShot 上游 SHOT F1 最优阈值记录为 `0.296`。在决定以精度收益推进完整迁移后, CLI 全局默认阈值已切到 `0.296`。如果使用历史 TransNetV2 模型做对比, 需要显式传 `--threshold 0.5` 或该模型对应的阈值。
+AutoShot 上游 SHOT F1 最优阈值记录为 `0.296`。在恢复显式 TransNetV2 fallback 后，CLI 默认阈值按模型拆分：`--model autoshot` 默认 `0.296`，`--model transnetv2` 默认 quick-check baseline 使用的 `0.02`。如果要复现实验中的其他 TransNetV2 阈值，仍然应该显式传 `--threshold`。
 
-**模型资产/导出脚本: 高影响, 是主工作量。**
+**模型资产/导出脚本。**
 
-已新增 `scripts/export_autoshot_onnx.py`, 职责包括:
+已新增 `scripts/export_autoshot_onnx.py` 和 `scripts/export_autoshot_safetensors.py`, 职责包括:
 
 - 加载上游 `TransNetV2Supernet`
 - 加载 `ckpt_0_200_0.pth` 中的 `pretrained_dict["net"]`
@@ -154,19 +157,21 @@ AutoShot 上游 SHOT F1 最优阈值记录为 `0.296`。在决定以精度收益
 - 包装 NHWC uint8 输入到 NCTHW float 模型输入
 - 替换 `gather_nd` 为 dynamic-batch-safe 的 `torch.gather` shim
 - 输出和现有 ONNX backend 一样的 `frames` / `single_frame` / `many_hot`
+- 输出 macOS MLX-C runtime 使用的 AutoShot safetensors
 - 生成 manifest, 写明模型名、opset、输入输出、推荐阈值 `0.296`
 
 **acceptance gate: 中等影响。**
 
-现有 `scripts/evaluate_runtime_candidate.py` 可以复用, 但需要新增 AutoShot Python reference 输出脚本, 或在导出脚本旁补一个 `run_autoshot_reference.py`。真实 checkpoint 到手后, gate 应至少覆盖:
+现有 `scripts/evaluate_runtime_candidate.py` 可以复用；`scripts/run_autoshot_reference.py` 已补齐。真实 checkpoint 到手后, gate 应至少覆盖:
 
 - Python AutoShot reference vs ONNX Runtime 输出概率差异
+- Python AutoShot reference vs MLX-C 输出概率差异
 - batch=1 和 batch=2/3 的 dynamic batch correctness
 - `assets/333.mp4` smoke
 - 如果拿得到 SHOT 测试数据, 再跑官方阈值 `0.296` 的 F1 sanity check
 
 ### 推荐下一步
 
-1. 用 `scripts/export_autoshot_onnx.py` 导出并固定 release 用 ONNX artifact。
-2. 用 `assets/333.mp4` 跑 Zig ONNX segment smoke; Linux ONNX 默认走 2 vCPU 下更快的 `--window-batch-size 1`。
-3. 后续如要追速度, 再单独评估 ORT graph optimization / CUDA, 不阻塞 AutoShot 精度迁移。
+1. 用 `scripts/export_autoshot_onnx.py` 和 `scripts/export_autoshot_safetensors.py` 导出并固定 release 用模型 artifact。
+2. 用 `assets/333.mp4` 跑 Zig ONNX 和 Zig MLX segment smoke; Linux ONNX 默认走 2 vCPU 下更快的 `--window-batch-size 1`。
+3. 后续如要追速度, 再单独评估 ORT graph optimization / CUDA / MLX compile，不阻塞 AutoShot 精度迁移。

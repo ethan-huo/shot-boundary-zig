@@ -6,8 +6,8 @@ Recommended invocation:
   CUDA_VISIBLE_DEVICES=-1 uv run --with torch --with einops --with numpy --with onnx --with onnxruntime \
     scripts/export_autoshot_onnx.py \
     --upstream /tmp/autoshot-codex \
-    --checkpoint target/models/ckpt_0_200_0.pth \
-    --output target/models/autoshot.onnx
+    --checkpoint models/ckpt_0_200_0.pth \
+    --output models/autoshot.onnx
 
 The exported model keeps the existing runtime ABI:
 
@@ -54,6 +54,10 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def default_manifest_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.manifest.json")
 
 
 def import_autoshot(upstream: Path):
@@ -243,7 +247,7 @@ def main() -> None:
             "dynamic_batch_smoke": smoke,
         },
     }
-    manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
+    manifest_path = args.manifest or default_manifest_path(args.output)
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
     print(f"wrote {args.output}")

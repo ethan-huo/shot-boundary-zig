@@ -1,4 +1,4 @@
-//! MLX-C TransNetV2 model edge.
+//! MLX-C AutoShot@F1 model edge.
 
 const std = @import("std");
 const spec = @import("spec");
@@ -8,14 +8,21 @@ const c = @cImport({
 });
 
 const base_filters = 16;
-const layers = 3;
-const blocks_per_layer = 2;
+const layer_count = 6;
+const transnet_layer_count = 3;
+const transnet_blocks_per_layer = 2;
+const transnet_dilation_count = 4;
+const block_feature_count = 3;
+const max_dilations = 5;
 const dense_dim = 1024;
 const lookup_window = 101;
 const similarity_dim = 128;
 const aux_output_dim = 128;
 const batch_norm_eps: f32 = 1e-3;
 const hist_bins = 512;
+const frame_similarity_in_filters = 448;
+const cnn_output_dim = 4608;
+const fc1_input_dim = cnn_output_dim + aux_output_dim + aux_output_dim;
 
 pub const implementation: []const u8 = "zig-mlx";
 
@@ -39,9 +46,218 @@ pub const Predictions = struct {
     }
 };
 
+pub const AutoShot = struct {
+    stream: c.mlx_stream,
+    layers: [layer_count]AutoShotLayer,
+    frame_similarity: FrameSimilarity,
+    color_histograms: ColorHistograms,
+    fc1: Linear,
+    cls_layer1: Linear,
+    cls_layer2: Linear,
+
+    pub fn load(allocator: std.mem.Allocator, path: []const u8) !AutoShot {
+        const cpu_stream = c.mlx_default_cpu_stream_new();
+        defer _ = c.mlx_stream_free(cpu_stream);
+
+        var data = c.mlx_map_string_to_array_new();
+        defer _ = c.mlx_map_string_to_array_free(data);
+        var metadata = c.mlx_map_string_to_string_new();
+        defer _ = c.mlx_map_string_to_string_free(metadata);
+
+        const z_path = try allocator.dupeZ(u8, path);
+        defer allocator.free(z_path);
+        try check(c.mlx_load_safetensors(&data, &metadata, z_path.ptr, cpu_stream), "mlx_load_safetensors");
+
+        const gpu = c.mlx_device_new_type(c.MLX_GPU, 0);
+        defer _ = c.mlx_device_free(gpu);
+        try check(c.mlx_set_default_device(gpu), "mlx_set_default_device");
+
+        var model = try loadFromMap(data);
+        errdefer model.deinit();
+        return model;
+    }
+
+    fn loadFromMap(data: c.mlx_map_string_to_array) !AutoShot {
+        var model_layers: [layer_count]AutoShotLayer = undefined;
+        var initialized_layers: usize = 0;
+        errdefer {
+            for (model_layers[0..initialized_layers]) |*layer| layer.deinit();
+        }
+
+        for (&model_layers, layer_configs) |*layer, config| {
+            layer.* = try AutoShotLayer.load(data, config);
+            initialized_layers += 1;
+        }
+
+        const frame_similarity = try FrameSimilarity.load(
+            data,
+            frame_similarity_in_filters,
+            lookup_window,
+            "frame_sim_layer",
+        );
+        errdefer frame_similarity.deinit();
+        const color_histograms = try ColorHistograms.load(data, lookup_window, "color_hist_layer");
+        errdefer color_histograms.deinit();
+
+        // AutoShot@F1 has Attention1D(n_layer=0), so the transformer branch is absent.
+        // The live classifier input is fc1_0, while fc1 is kept only in upstream weights.
+        const fc1 = try Linear.load(data, fc1_input_dim, dense_dim, "fc1_0");
+        errdefer fc1.deinit();
+        const cls_layer1 = try Linear.load(data, dense_dim, 1, "cls_layer1");
+        errdefer cls_layer1.deinit();
+        const cls_layer2 = try Linear.load(data, dense_dim, 1, "cls_layer2");
+        errdefer cls_layer2.deinit();
+
+        return .{
+            .stream = c.mlx_default_gpu_stream_new(),
+            .layers = model_layers,
+            .frame_similarity = frame_similarity,
+            .color_histograms = color_histograms,
+            .fc1 = fc1,
+            .cls_layer1 = cls_layer1,
+            .cls_layer2 = cls_layer2,
+        };
+    }
+
+    pub fn deinit(self: *AutoShot) void {
+        self.cls_layer2.deinit();
+        self.cls_layer1.deinit();
+        self.fc1.deinit();
+        self.color_histograms.deinit();
+        self.frame_similarity.deinit();
+        for (&self.layers) |*layer| layer.deinit();
+        _ = c.mlx_stream_free(self.stream);
+        self.* = undefined;
+    }
+
+    pub fn predictBatch(
+        self: *const AutoShot,
+        allocator: std.mem.Allocator,
+        window_batch_rgb24: []const u8,
+        batch_size: usize,
+    ) !Predictions {
+        if (batch_size == 0) return error.InvalidInput;
+        const expected_len = batch_size * spec.window_frames * spec.frameBytes();
+        if (window_batch_rgb24.len != expected_len) return error.InvalidInput;
+
+        var input_shape = [_]c_int{
+            @intCast(batch_size),
+            @intCast(spec.window_frames),
+            @intCast(spec.input_height),
+            @intCast(spec.input_width),
+            @intCast(spec.input_channels),
+        };
+        const inputs = c.mlx_array_new_data(
+            window_batch_rgb24.ptr,
+            &input_shape,
+            @intCast(input_shape.len),
+            c.MLX_UINT8,
+        );
+        defer freeArray(inputs);
+
+        const output = try self.forward(allocator, inputs, window_batch_rgb24, batch_size);
+        defer output.deinit();
+
+        const single_frame = try centerProbabilities(allocator, output.single_frame_logits, self.stream);
+        errdefer allocator.free(single_frame);
+        const many_hot = try centerProbabilities(allocator, output.many_hot_logits, self.stream);
+
+        return .{
+            .single_frame = single_frame,
+            .many_hot = many_hot,
+        };
+    }
+
+    fn forward(
+        self: *const AutoShot,
+        allocator: std.mem.Allocator,
+        inputs: c.mlx_array,
+        window_batch_rgb24: []const u8,
+        batch_size: usize,
+    ) !ModelOutput {
+        validateInputWindow(inputs);
+
+        const as_float = try astype(inputs, c.MLX_FLOAT32, self.stream);
+        defer freeArray(as_float);
+        const divisor = c.mlx_array_new_float32(255.0);
+        defer freeArray(divisor);
+        var x = try binaryOp(c.mlx_divide, as_float, divisor, self.stream, "mlx_divide");
+        defer freeArray(x);
+
+        var block_features: [block_feature_count]c.mlx_array = undefined;
+        var initialized_features: usize = 0;
+        defer {
+            for (block_features[0..initialized_features]) |feature| freeArray(feature);
+        }
+        var shortcut: ?c.mlx_array = null;
+        defer if (shortcut) |array| freeArray(array);
+
+        for (&self.layers, 0..) |*layer, index| {
+            const next = try layer.forward(x, self.stream);
+            freeArray(x);
+            x = next;
+
+            if (index == 0 or index == 2 or index == 4) {
+                if (shortcut) |array| freeArray(array);
+                shortcut = try cloneArray(x);
+            } else {
+                const shortcut_array = shortcut orelse return error.InvalidShape;
+                shortcut = null;
+                defer freeArray(shortcut_array);
+
+                const added = try binaryOp(c.mlx_add, x, shortcut_array, self.stream, "mlx_add");
+                defer freeArray(added);
+                const pooled = try avgPool3dSpatial2x2(added, self.stream);
+                freeArray(x);
+                x = pooled;
+
+                block_features[initialized_features] = try cloneArray(x);
+                initialized_features += 1;
+            }
+        }
+
+        const dims = try dims5("sddcnn_output", x);
+        var feature_shape = [_]c_int{ dims[0], dims[1], dims[2] * dims[3] * dims[4] };
+        var features = try reshape(x, &feature_shape, self.stream);
+        defer freeArray(features);
+
+        if (initialized_features != block_feature_count) return error.InvalidShape;
+        const sim_features = try self.frame_similarity.forward(block_features[0..initialized_features], self.stream);
+        defer freeArray(sim_features);
+        const features_with_similarity = try concatenatePrefix(features, sim_features, 2, self.stream);
+        freeArray(features);
+        features = features_with_similarity;
+
+        const color_features = try self.color_histograms.forward(
+            allocator,
+            window_batch_rgb24,
+            batch_size,
+            self.stream,
+        );
+        defer freeArray(color_features);
+        const features_with_color = try concatenatePrefix(features, color_features, 2, self.stream);
+        freeArray(features);
+        features = features_with_color;
+
+        const fc = try self.fc1.forward(features, self.stream);
+        defer freeArray(fc);
+        const hidden = try relu(fc, self.stream);
+        defer freeArray(hidden);
+
+        const single_frame_logits = try self.cls_layer1.forward(hidden, self.stream);
+        errdefer freeArray(single_frame_logits);
+        const many_hot_logits = try self.cls_layer2.forward(hidden, self.stream);
+
+        return .{
+            .single_frame_logits = single_frame_logits,
+            .many_hot_logits = many_hot_logits,
+        };
+    }
+};
+
 pub const TransNetV2 = struct {
     stream: c.mlx_stream,
-    blocks: [layers]StackedDdcnn,
+    blocks: [transnet_layer_count]StackedDdcnn,
     frame_similarity: FrameSimilarity,
     color_histograms: ColorHistograms,
     fc1: Linear,
@@ -71,7 +287,7 @@ pub const TransNetV2 = struct {
     }
 
     fn loadFromMap(data: c.mlx_map_string_to_array) !TransNetV2 {
-        var blocks: [layers]StackedDdcnn = undefined;
+        var blocks: [transnet_layer_count]StackedDdcnn = undefined;
         var initialized_blocks: usize = 0;
         errdefer {
             for (blocks[0..initialized_blocks]) |*block| block.deinit();
@@ -82,36 +298,26 @@ pub const TransNetV2 = struct {
             const filters = base_filters * (@as(usize, 1) << @intCast(layer_index));
             var prefix_buf: [32]u8 = undefined;
             const prefix = try std.fmt.bufPrint(&prefix_buf, "SDDCNN.{d}", .{layer_index});
-            block.* = try StackedDdcnn.load(data, in_filters, blocks_per_layer, filters, prefix);
+            block.* = try StackedDdcnn.load(data, in_filters, filters, prefix);
             initialized_blocks += 1;
             in_filters = filters * 4;
         }
 
-        const frame_similarity_in_filters = comptime blk: {
-            var sum = 0;
-            for (0..layers) |layer_index| {
-                sum += (base_filters << layer_index) * 4;
-            }
-            break :blk sum;
-        };
-
-        const frame_similarity = try FrameSimilarity.load(
+        const frame_similarity = try FrameSimilarity.loadPlainLinear(
             data,
             frame_similarity_in_filters,
             lookup_window,
             "frame_sim_layer",
         );
         errdefer frame_similarity.deinit();
-        const color_histograms = try ColorHistograms.load(data, lookup_window, "color_hist_layer");
+        const color_histograms = try ColorHistograms.loadPlainLinear(data, lookup_window, "color_hist_layer");
         errdefer color_histograms.deinit();
 
-        const cnn_output_dim = (base_filters << (layers - 1)) * 4 * 3 * 6;
-        const output_dim = cnn_output_dim + aux_output_dim + aux_output_dim;
-        const fc1 = try Linear.load(data, output_dim, dense_dim, "fc1");
+        const fc1 = try Linear.loadPlain(data, fc1_input_dim, dense_dim, "fc1");
         errdefer fc1.deinit();
-        const cls_layer1 = try Linear.load(data, dense_dim, 1, "cls_layer1");
+        const cls_layer1 = try Linear.loadPlain(data, dense_dim, 1, "cls_layer1");
         errdefer cls_layer1.deinit();
-        const cls_layer2 = try Linear.load(data, dense_dim, 1, "cls_layer2");
+        const cls_layer2 = try Linear.loadPlain(data, dense_dim, 1, "cls_layer2");
         errdefer cls_layer2.deinit();
 
         return .{
@@ -190,7 +396,7 @@ pub const TransNetV2 = struct {
         var x = try binaryOp(c.mlx_divide, as_float, divisor, self.stream, "mlx_divide");
         defer freeArray(x);
 
-        var block_features: [layers]c.mlx_array = undefined;
+        var block_features: [block_feature_count]c.mlx_array = undefined;
         var initialized_features: usize = 0;
         defer {
             for (block_features[0..initialized_features]) |feature| freeArray(feature);
@@ -209,9 +415,12 @@ pub const TransNetV2 = struct {
         var features = try reshape(x, &feature_shape, self.stream);
         defer freeArray(features);
 
-        const sim_features = try self.frame_similarity.forward(&block_features, self.stream);
+        if (initialized_features != block_feature_count) return error.InvalidShape;
+        const sim_features = try self.frame_similarity.forward(block_features[0..initialized_features], self.stream);
         defer freeArray(sim_features);
-        features = try concatenateAndReplace(features, sim_features, 2, self.stream);
+        const features_with_similarity = try concatenatePrefix(features, sim_features, 2, self.stream);
+        freeArray(features);
+        features = features_with_similarity;
 
         const color_features = try self.color_histograms.forward(
             allocator,
@@ -220,7 +429,9 @@ pub const TransNetV2 = struct {
             self.stream,
         );
         defer freeArray(color_features);
-        features = try concatenateAndReplace(features, color_features, 2, self.stream);
+        const features_with_color = try concatenatePrefix(features, color_features, 2, self.stream);
+        freeArray(features);
+        features = features_with_color;
 
         const fc = try self.fc1.forward(features, self.stream);
         defer freeArray(fc);
@@ -248,18 +459,89 @@ const ModelOutput = struct {
     }
 };
 
+const LayerKind = enum {
+    standard,
+    shared_spatial_a,
+};
+
+const LayerConfig = struct {
+    prefix: []const u8,
+    in_filters: usize,
+    filters: usize,
+    multiplier: usize,
+    dilation_count: usize,
+    kind: LayerKind,
+
+    fn outputChannels(self: LayerConfig) usize {
+        return self.filters * 4;
+    }
+
+    fn midFilters(self: LayerConfig) usize {
+        return self.filters * self.multiplier;
+    }
+};
+
+const layer_configs = [_]LayerConfig{
+    .{
+        .prefix = "Layer_0_3",
+        .in_filters = spec.input_channels,
+        .filters = base_filters,
+        .multiplier = 1,
+        .dilation_count = 4,
+        .kind = .standard,
+    },
+    .{
+        .prefix = "Layer_1_8",
+        .in_filters = base_filters * 4,
+        .filters = base_filters,
+        .multiplier = 4,
+        .dilation_count = 5,
+        .kind = .shared_spatial_a,
+    },
+    .{
+        .prefix = "Layer_2_8",
+        .in_filters = base_filters * 4,
+        .filters = base_filters * 2,
+        .multiplier = 4,
+        .dilation_count = 5,
+        .kind = .shared_spatial_a,
+    },
+    .{
+        .prefix = "Layer_3_8",
+        .in_filters = base_filters * 8,
+        .filters = base_filters * 2,
+        .multiplier = 4,
+        .dilation_count = 5,
+        .kind = .shared_spatial_a,
+    },
+    .{
+        .prefix = "Layer_4_13",
+        .in_filters = base_filters * 8,
+        .filters = base_filters * 4,
+        .multiplier = 3,
+        .dilation_count = 5,
+        .kind = .standard,
+    },
+    .{
+        .prefix = "Layer_5_12",
+        .in_filters = base_filters * 16,
+        .filters = base_filters * 4,
+        .multiplier = 2,
+        .dilation_count = 5,
+        .kind = .standard,
+    },
+};
+
 const StackedDdcnn = struct {
-    blocks: [blocks_per_layer]DilatedDdcnn,
+    blocks: [transnet_blocks_per_layer]DilatedDdcnn,
 
     fn load(
         data: c.mlx_map_string_to_array,
         in_filters: usize,
-        block_count: usize,
         filters: usize,
         prefix: []const u8,
     ) !StackedDdcnn {
-        std.debug.assert(block_count == blocks_per_layer);
-        var blocks: [blocks_per_layer]DilatedDdcnn = undefined;
+        var blocks: [transnet_blocks_per_layer]DilatedDdcnn = undefined;
         var initialized: usize = 0;
         errdefer {
             for (blocks[0..initialized]) |*block| block.deinit();
@@ -276,7 +558,7 @@ const StackedDdcnn = struct {
                 data,
                 if (block_index == 0) in_filters else filters * 4,
                 filters,
-                block_index + 1 != block_count,
+                block_index + 1 != transnet_blocks_per_layer,
                 block_prefix,
             );
             initialized += 1;
@@ -300,22 +582,21 @@ const StackedDdcnn = struct {
             const next = try block.forward(x, stream);
             freeArray(x);
             x = next;
+            // Upstream TransNetV2 uses the first block output as the residual shortcut.
             if (shortcut == null) shortcut = try cloneArray(x);
         }
 
         const activated = try relu(x, stream);
         defer freeArray(activated);
-
-        const shortcut_array = shortcut.?;
+        const shortcut_array = shortcut orelse return error.InvalidShape;
         const added = try binaryOp(c.mlx_add, activated, shortcut_array, stream, "mlx_add");
         defer freeArray(added);
-
         return avgPool3dSpatial2x2(added, stream);
     }
 };
 
 const DilatedDdcnn = struct {
-    convs: [4]SeparableConv3d,
+    convs: [transnet_dilation_count]ConfigurableConv3d,
     bn: BatchNorm,
     activate: bool,
 
@@ -327,7 +608,7 @@ const DilatedDdcnn = struct {
         prefix: []const u8,
     ) !DilatedDdcnn {
         const dilations = [_]c_int{ 1, 2, 4, 8 };
-        var convs: [4]SeparableConv3d = undefined;
+        var convs: [transnet_dilation_count]ConfigurableConv3d = undefined;
         var initialized: usize = 0;
         errdefer {
             for (convs[0..initialized]) |*conv| conv.deinit();
@@ -337,10 +618,17 @@ const DilatedDdcnn = struct {
             var conv_prefix_buf: [96]u8 = undefined;
             const conv_prefix = try std.fmt.bufPrint(
                 &conv_prefix_buf,
-                "{s}.Conv3D_{d}",
+                "{s}.Conv3D_{d}.layers",
                 .{ prefix, dilation },
             );
-            conv.* = try SeparableConv3d.load(data, in_filters, filters, dilation, conv_prefix);
+            conv.* = try ConfigurableConv3d.loadSeparable(
+                data,
+                in_filters,
+                filters * 2,
+                filters,
+                dilation,
+                conv_prefix,
+            );
             initialized += 1;
         }
 
@@ -363,7 +651,7 @@ const DilatedDdcnn = struct {
     }
 
     fn forward(self: *const DilatedDdcnn, inputs: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
-        var conv_outputs: [4]c.mlx_array = undefined;
+        var conv_outputs: [transnet_dilation_count]c.mlx_array = undefined;
         var initialized: usize = 0;
         defer {
             for (conv_outputs[0..initialized]) |array| freeArray(array);
@@ -374,7 +662,7 @@ const DilatedDdcnn = struct {
             initialized += 1;
         }
 
-        const concatenated = try concatenate(&conv_outputs, 4, stream);
+        const concatenated = try concatenate(conv_outputs[0..initialized], 4, stream);
         defer freeArray(concatenated);
         const normalized = try self.bn.forward(concatenated, stream);
         if (!self.activate) return normalized;
@@ -383,59 +671,134 @@ const DilatedDdcnn = struct {
     }
 };
 
-const SeparableConv3d = struct {
-    spatial_weight: c.mlx_array,
+const AutoShotLayer = struct {
+    shared_spatial_weight: ?c.mlx_array,
+    convs: [max_dilations]ConfigurableConv3d,
+    conv_count: usize,
+    bn: BatchNorm,
+
+    fn load(data: c.mlx_map_string_to_array, config: LayerConfig) !AutoShotLayer {
+        std.debug.assert(config.dilation_count <= max_dilations);
+        const output_channels = config.outputChannels();
+        const mid_filters = config.midFilters();
+
+        var shared_spatial_weight: ?c.mlx_array = null;
+        errdefer if (shared_spatial_weight) |array| freeArray(array);
+        if (config.kind == .shared_spatial_a) {
+            var share_name_buf: [128]u8 = undefined;
+            const share_name = try std.fmt.bufPrintZ(&share_name_buf, "{s}.share.weight", .{config.prefix});
+            shared_spatial_weight = try loadSpatialWeight(data, share_name, config.in_filters, mid_filters);
+        }
+
+        var convs: [max_dilations]ConfigurableConv3d = undefined;
+        var initialized: usize = 0;
+        errdefer {
+            for (convs[0..initialized]) |*conv| conv.deinit();
+        }
+
+        const regular_branch_filters = output_channels / config.dilation_count;
+        for (convs[0..config.dilation_count], 0..) |*conv, dilation_index| {
+            const branch_filters = if (dilation_index + 1 == config.dilation_count)
+                output_channels - regular_branch_filters * (config.dilation_count - 1)
+            else
+                regular_branch_filters;
+            const dilation: c_int = @as(c_int, 1) << @intCast(dilation_index);
+            var conv_prefix_buf: [128]u8 = undefined;
+            const conv_prefix = try std.fmt.bufPrint(
+                &conv_prefix_buf,
+                "{s}.conv_blocks.{d}.layers",
+                .{ config.prefix, dilation_index },
+            );
+            conv.* = switch (config.kind) {
+                .standard => try ConfigurableConv3d.loadSeparable(
+                    data,
+                    config.in_filters,
+                    mid_filters,
+                    branch_filters,
+                    dilation,
+                    conv_prefix,
+                ),
+                .shared_spatial_a => try ConfigurableConv3d.loadTemporalOnly(
+                    data,
+                    mid_filters,
+                    branch_filters,
+                    dilation,
+                    conv_prefix,
+                ),
+            };
+            initialized += 1;
+        }
+
+        var bn_prefix_buf: [80]u8 = undefined;
+        const bn_prefix = try std.fmt.bufPrint(&bn_prefix_buf, "{s}.batch_norm", .{config.prefix});
+        const bn = try BatchNorm.load(data, output_channels, bn_prefix);
+        errdefer bn.deinit();
+
+        return .{
+            .shared_spatial_weight = shared_spatial_weight,
+            .convs = convs,
+            .conv_count = config.dilation_count,
+            .bn = bn,
+        };
+    }
+
+    fn deinit(self: *AutoShotLayer) void {
+        self.bn.deinit();
+        for (self.convs[0..self.conv_count]) |*conv| conv.deinit();
+        if (self.shared_spatial_weight) |array| freeArray(array);
+        self.* = undefined;
+    }
+
+    fn forward(self: *const AutoShotLayer, inputs: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
+        var shared: ?c.mlx_array = null;
+        defer if (shared) |array| freeArray(array);
+        if (self.shared_spatial_weight) |weight| {
+            shared = try convSpatial(inputs, weight, stream);
+        }
+
+        var conv_outputs: [max_dilations]c.mlx_array = undefined;
+        var initialized: usize = 0;
+        defer {
+            for (conv_outputs[0..initialized]) |array| freeArray(array);
+        }
+
+        for (self.convs[0..self.conv_count], 0..) |*conv, index| {
+            conv_outputs[index] = if (shared) |array|
+                try conv.forwardTemporal(array, stream)
+            else
+                try conv.forward(inputs, stream);
+            initialized += 1;
+        }
+
+        const concatenated = try concatenate(conv_outputs[0..initialized], 4, stream);
+        defer freeArray(concatenated);
+        const normalized = try self.bn.forward(concatenated, stream);
+        defer freeArray(normalized);
+        return relu(normalized, stream);
+    }
+};
+
+const ConfigurableConv3d = struct {
+    spatial_weight: ?c.mlx_array,
     temporal_weight: c.mlx_array,
     temporal_dilation: c_int,
 
-    fn load(
+    fn loadSeparable(
         data: c.mlx_map_string_to_array,
         in_filters: usize,
-        filters: usize,
+        mid_filters: usize,
+        out_filters: usize,
         temporal_dilation: c_int,
         prefix: []const u8,
-    ) !SeparableConv3d {
+    ) !ConfigurableConv3d {
         var spatial_name_buf: [128]u8 = undefined;
-        const spatial_name = try std.fmt.bufPrintZ(&spatial_name_buf, "{s}.layers.0.weight", .{prefix});
-        const spatial_raw = try takeWeight(data, spatial_name);
-        defer freeArray(spatial_raw);
-        try validateShape(spatial_name, spatial_raw, &.{
-            @intCast(2 * filters),
-            @intCast(in_filters),
-            1,
-            3,
-            3,
-        });
-        const stream = c.mlx_default_gpu_stream_new();
-        defer _ = c.mlx_stream_free(stream);
-        const spatial_transposed = try transposeAxes(spatial_raw, &.{ 0, 3, 4, 1, 2 }, stream);
-        defer freeArray(spatial_transposed);
-        const spatial_weight = try reshape(spatial_transposed, &.{
-            @intCast(2 * filters),
-            3,
-            3,
-            @intCast(in_filters),
-        }, stream);
+        const spatial_name = try std.fmt.bufPrintZ(&spatial_name_buf, "{s}.0.weight", .{prefix});
+        const spatial_weight = try loadSpatialWeight(data, spatial_name, in_filters, mid_filters);
         errdefer freeArray(spatial_weight);
 
         var temporal_name_buf: [128]u8 = undefined;
-        const temporal_name = try std.fmt.bufPrintZ(&temporal_name_buf, "{s}.layers.1.weight", .{prefix});
-        const temporal_raw = try takeWeight(data, temporal_name);
-        defer freeArray(temporal_raw);
-        try validateShape(temporal_name, temporal_raw, &.{
-            @intCast(filters),
-            @intCast(2 * filters),
-            3,
-            1,
-            1,
-        });
-        const temporal_transposed = try transposeAxes(temporal_raw, &.{ 0, 2, 1, 3, 4 }, stream);
-        defer freeArray(temporal_transposed);
-        const temporal_weight = try reshape(temporal_transposed, &.{
-            @intCast(filters),
-            3,
-            @intCast(2 * filters),
-        }, stream);
+        const temporal_name = try std.fmt.bufPrintZ(&temporal_name_buf, "{s}.1.weight", .{prefix});
+        const temporal_weight = try loadTemporalWeight(data, temporal_name, mid_filters, out_filters);
         errdefer freeArray(temporal_weight);
 
         return .{
@@ -445,34 +808,49 @@ const SeparableConv3d = struct {
         };
     }
 
-    fn deinit(self: *SeparableConv3d) void {
+    fn loadTemporalOnly(
+        data: c.mlx_map_string_to_array,
+        in_filters: usize,
+        out_filters: usize,
+        temporal_dilation: c_int,
+        prefix: []const u8,
+    ) !ConfigurableConv3d {
+        var temporal_name_buf: [128]u8 = undefined;
+        const temporal_name = try std.fmt.bufPrintZ(&temporal_name_buf, "{s}.0.weight", .{prefix});
+        const temporal_weight = try loadTemporalWeight(data, temporal_name, in_filters, out_filters);
+        errdefer freeArray(temporal_weight);
+        return .{
+            .spatial_weight = null,
+            .temporal_weight = temporal_weight,
+            .temporal_dilation = temporal_dilation,
+        };
+    }
+
+    fn deinit(self: *ConfigurableConv3d) void {
         freeArray(self.temporal_weight);
-        freeArray(self.spatial_weight);
+        if (self.spatial_weight) |array| freeArray(array);
         self.* = undefined;
     }
 
-    fn forward(self: *const SeparableConv3d, inputs: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
-        const dims = try dims5("conv3d_spatial_input", inputs);
+    fn forward(self: *const ConfigurableConv3d, inputs: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
+        const spatial_weight = self.spatial_weight orelse return error.InvalidShape;
+        const spatial = try convSpatial(inputs, spatial_weight, stream);
+        defer freeArray(spatial);
+        return self.forwardTemporal(spatial, stream);
+    }
+
+    fn forwardTemporal(self: *const ConfigurableConv3d, inputs: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
+        const dims = try dims5("conv3d_temporal_input", inputs);
         const batch = dims[0];
         const frames = dims[1];
         const height = dims[2];
         const width = dims[3];
         const channels = dims[4];
-
-        const spatial_input = try reshape(inputs, &.{ batch * frames, height, width, channels }, stream);
-        defer freeArray(spatial_input);
-        const spatial = try conv2d(spatial_input, self.spatial_weight, 1, 1, 1, 1, 1, 1, stream);
-        defer freeArray(spatial);
-
-        const spatial_dims = try dims4("conv3d_spatial_output", spatial);
-        const out_height = spatial_dims[1];
-        const out_width = spatial_dims[2];
-        const out_channels = spatial_dims[3];
         const temporal_input = try reshapeThenTransposeThenReshape(
-            spatial,
-            &.{ batch, frames, out_height, out_width, out_channels },
+            inputs,
+            &.{ batch, frames, height, width, channels },
             &.{ 0, 2, 3, 1, 4 },
-            &.{ batch * out_height * out_width, frames, out_channels },
+            &.{ batch * height * width, frames, channels },
             stream,
         );
         defer freeArray(temporal_input);
@@ -492,9 +870,9 @@ const SeparableConv3d = struct {
         const temporal_channels = temporal_dims[2];
         return reshapeThenTransposeThenReshape(
             temporal,
-            &.{ batch, out_height, out_width, out_frames, temporal_channels },
+            &.{ batch, height, width, out_frames, temporal_channels },
             &.{ 0, 3, 1, 2, 4 },
-            &.{ batch, out_frames, out_height, out_width, temporal_channels },
+            &.{ batch, out_frames, height, width, temporal_channels },
             stream,
         );
     }
@@ -565,13 +943,30 @@ const FrameSimilarity = struct {
         return .{ .projection = projection, .fc = fc, .lookup_window = window };
     }
 
+    fn loadPlainLinear(
+        data: c.mlx_map_string_to_array,
+        in_filters: usize,
+        window: usize,
+        prefix: []const u8,
+    ) !FrameSimilarity {
+        var projection_prefix_buf: [80]u8 = undefined;
+        const projection_prefix = try std.fmt.bufPrint(&projection_prefix_buf, "{s}.projection", .{prefix});
+        const projection = try Linear.loadPlain(data, in_filters, similarity_dim, projection_prefix);
+        errdefer projection.deinit();
+        var fc_prefix_buf: [80]u8 = undefined;
+        const fc_prefix = try std.fmt.bufPrint(&fc_prefix_buf, "{s}.fc", .{prefix});
+        const fc = try Linear.loadPlain(data, window, aux_output_dim, fc_prefix);
+        errdefer fc.deinit();
+        return .{ .projection = projection, .fc = fc, .lookup_window = window };
+    }
+
     fn deinit(self: FrameSimilarity) void {
         self.fc.deinit();
         self.projection.deinit();
     }
 
     fn forward(self: *const FrameSimilarity, inputs: []const c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
-        var pooled: [layers]c.mlx_array = undefined;
+        var pooled: [block_feature_count]c.mlx_array = undefined;
         var initialized: usize = 0;
         defer {
             for (pooled[0..initialized]) |array| freeArray(array);
@@ -613,6 +1008,15 @@ const ColorHistograms = struct {
         };
     }
 
+    fn loadPlainLinear(data: c.mlx_map_string_to_array, window: usize, prefix: []const u8) !ColorHistograms {
+        var fc_prefix_buf: [80]u8 = undefined;
+        const fc_prefix = try std.fmt.bufPrint(&fc_prefix_buf, "{s}.fc", .{prefix});
+        return .{
+            .fc = try Linear.loadPlain(data, window, aux_output_dim, fc_prefix),
+            .lookup_window = window,
+        };
+    }
+
     fn deinit(self: ColorHistograms) void {
         self.fc.deinit();
     }
@@ -643,6 +1047,14 @@ const Linear = struct {
     bias: c.mlx_array,
 
     fn load(data: c.mlx_map_string_to_array, in_dim: usize, out_dim: usize, prefix: []const u8) !Linear {
+        const weight = try takeNamedVector(data, prefix, "linear.weight", &.{ @intCast(out_dim), @intCast(in_dim) });
+        errdefer freeArray(weight);
+        const bias = try takeNamedVector(data, prefix, "linear.bias", &.{@intCast(out_dim)});
+        errdefer freeArray(bias);
+        return .{ .weight = weight, .bias = bias };
+    }
+
+    fn loadPlain(data: c.mlx_map_string_to_array, in_dim: usize, out_dim: usize, prefix: []const u8) !Linear {
         const weight = try takeNamedVector(data, prefix, "weight", &.{ @intCast(out_dim), @intCast(in_dim) });
         errdefer freeArray(weight);
         const bias = try takeNamedVector(data, prefix, "bias", &.{@intCast(out_dim)});
@@ -663,6 +1075,59 @@ const Linear = struct {
         return binaryOp(c.mlx_add, product, self.bias, stream, "mlx_add");
     }
 };
+
+fn loadSpatialWeight(
+    data: c.mlx_map_string_to_array,
+    name: [:0]const u8,
+    in_filters: usize,
+    out_filters: usize,
+) !c.mlx_array {
+    const raw = try takeWeight(data, name);
+    defer freeArray(raw);
+    try validateShape(name, raw, &.{
+        @intCast(out_filters),
+        @intCast(in_filters),
+        1,
+        3,
+        3,
+    });
+    const stream = c.mlx_default_gpu_stream_new();
+    defer _ = c.mlx_stream_free(stream);
+    const transposed = try transposeAxes(raw, &.{ 0, 3, 4, 1, 2 }, stream);
+    defer freeArray(transposed);
+    return reshape(transposed, &.{
+        @intCast(out_filters),
+        3,
+        3,
+        @intCast(in_filters),
+    }, stream);
+}
+
+fn loadTemporalWeight(
+    data: c.mlx_map_string_to_array,
+    name: [:0]const u8,
+    in_filters: usize,
+    out_filters: usize,
+) !c.mlx_array {
+    const raw = try takeWeight(data, name);
+    defer freeArray(raw);
+    try validateShape(name, raw, &.{
+        @intCast(out_filters),
+        @intCast(in_filters),
+        3,
+        1,
+        1,
+    });
+    const stream = c.mlx_default_gpu_stream_new();
+    defer _ = c.mlx_stream_free(stream);
+    const transposed = try transposeAxes(raw, &.{ 0, 2, 1, 3, 4 }, stream);
+    defer freeArray(transposed);
+    return reshape(transposed, &.{
+        @intCast(out_filters),
+        3,
+        @intCast(in_filters),
+    }, stream);
+}
 
 fn takeNamedVector(
     data: c.mlx_map_string_to_array,
@@ -824,16 +1289,14 @@ fn relu(inputs: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
     return binaryOp(c.mlx_maximum, inputs, zero, stream, "mlx_maximum");
 }
 
-fn concatenateAndReplace(
+fn concatenatePrefix(
     current: c.mlx_array,
     prefix: c.mlx_array,
     axis: c_int,
     stream: c.mlx_stream,
 ) !c.mlx_array {
     const arrays = [_]c.mlx_array{ prefix, current };
-    const next = try concatenate(&arrays, axis, stream);
-    freeArray(current);
-    return next;
+    return concatenate(&arrays, axis, stream);
 }
 
 fn reshapeThenTransposeThenReshape(
@@ -850,6 +1313,24 @@ fn reshapeThenTransposeThenReshape(
     return reshape(transposed, final_shape, stream);
 }
 
+fn convSpatial(inputs: c.mlx_array, weight: c.mlx_array, stream: c.mlx_stream) !c.mlx_array {
+    const dims = try dims5("conv3d_spatial_input", inputs);
+    const batch = dims[0];
+    const frames = dims[1];
+    const height = dims[2];
+    const width = dims[3];
+    const channels = dims[4];
+    const spatial_input = try reshape(inputs, &.{ batch * frames, height, width, channels }, stream);
+    defer freeArray(spatial_input);
+    const spatial = try conv2d(spatial_input, weight, 1, 1, 1, 1, 1, 1, stream);
+    defer freeArray(spatial);
+    const spatial_dims = try dims4("conv3d_spatial_output", spatial);
+    const out_height = spatial_dims[1];
+    const out_width = spatial_dims[2];
+    const out_channels = spatial_dims[3];
+    return reshape(spatial, &.{ batch, frames, out_height, out_width, out_channels }, stream);
+}
+
 fn validateInputWindow(inputs: c.mlx_array) void {
     std.debug.assert(c.mlx_array_dtype(inputs) == c.MLX_UINT8);
     std.debug.assert(c.mlx_array_ndim(inputs) == 5);
@@ -861,11 +1342,20 @@ fn validateInputWindow(inputs: c.mlx_array) void {
 }
 
 fn validateShape(name: []const u8, array: c.mlx_array, expected: []const c_int) !void {
-    _ = name;
-    if (c.mlx_array_ndim(array) != expected.len) return error.InvalidRank;
+    const ndim = c.mlx_array_ndim(array);
+    if (ndim != expected.len) {
+        std.debug.print("MLX tensor {s}: expected rank {d}, got {d}\n", .{ name, expected.len, ndim });
+        return error.InvalidRank;
+    }
     const actual = c.mlx_array_shape(array);
     for (expected, 0..) |dim, index| {
-        if (actual[index] != dim) return error.InvalidShape;
+        if (actual[index] != dim) {
+            std.debug.print(
+                "MLX tensor {s}: dimension {d} expected {d}, got {d}\n",
+                .{ name, index, dim, actual[index] },
+            );
+            return error.InvalidShape;
+        }
     }
 }
 

@@ -6,7 +6,7 @@ Recommended invocation:
   uv run --with torch --with tensorflow==2.16.2 --with onnx \
     scripts/export_onnx.py \
     --upstream /path/to/TransNetV2 \
-    --output target/models/transnetv2.onnx
+    --output models/transnetv2.onnx
 
 If a PyTorch state dict has already been generated with the upstream converter,
 pass it via `--pytorch-weights` and omit TensorFlow from the uv dependency list.

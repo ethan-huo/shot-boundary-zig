@@ -1,0 +1,96 @@
+{
+  "model": "AutoShot@F1",
+  "format": "onnx",
+  "opset": 18,
+  "upstream": {
+    "repository": "https://github.com/wentaozhu/AutoShot",
+    "path": ".scratch/autoshot"
+  },
+  "checkpoint": {
+    "path": "models/ckpt_0_200_0.pth",
+    "sha256": "3e85290546ce6d32f4a3581ec2cae87aedd2402246a0d46b4d361a330b4b1fa6",
+    "state_tensor_count": 90,
+    "parameter_count": 14299202
+  },
+  "recommended_scene_threshold": 0.296,
+  "input": {
+    "name": "frames",
+    "dtype": "uint8",
+    "shape": [
+      "batch",
+      100,
+      27,
+      48,
+      3
+    ]
+  },
+  "outputs": [
+    {
+      "name": "single_frame",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        50
+      ],
+      "activation": "sigmoid"
+    },
+    {
+      "name": "many_hot",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        50
+      ],
+      "activation": "sigmoid"
+    }
+  ],
+  "export": {
+    "path": "models/autoshot.onnx",
+    "bytes": 33154062,
+    "node_count": 365,
+    "dynamic_batch_smoke": [
+      {
+        "batch_size": 1,
+        "max_abs_diff": 7.593189366161823e-08,
+        "outputs": [
+          [
+            1,
+            50
+          ],
+          [
+            1,
+            50
+          ]
+        ]
+      },
+      {
+        "batch_size": 2,
+        "max_abs_diff": 8.63510649651289e-08,
+        "outputs": [
+          [
+            2,
+            50
+          ],
+          [
+            2,
+            50
+          ]
+        ]
+      },
+      {
+        "batch_size": 3,
+        "max_abs_diff": 8.475035429000854e-08,
+        "outputs": [
+          [
+            3,
+            50
+          ],
+          [
+            3,
+            50
+          ]
+        ]
+      }
+    ]
+  }
+}

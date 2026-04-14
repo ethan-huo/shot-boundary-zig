@@ -89,9 +89,9 @@ SHOT_THRESHOLDS = np.array(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream", type=Path, default=Path("/tmp/autoshot-codex"))
-    parser.add_argument("--checkpoint", type=Path, default=Path("target/models/ckpt_0_200_0.pth"))
-    parser.add_argument("--output-onnx", type=Path, default=Path("target/models/autoshot.onnx"))
-    parser.add_argument("--transnetv2-onnx", type=Path, default=Path("target/models/transnetv2.onnx"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("models/ckpt_0_200_0.pth"))
+    parser.add_argument("--output-onnx", type=Path, default=Path("models/autoshot.onnx"))
+    parser.add_argument("--transnetv2-onnx", type=Path, default=Path("models/transnetv2.onnx"))
     parser.add_argument("--video", type=Path, default=Path("assets/333.mp4"))
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--window-batch-size", type=int, default=2)

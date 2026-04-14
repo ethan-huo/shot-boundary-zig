@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a TransNetV2 platform runtime candidate against local baselines."""
+"""Evaluate a platform runtime candidate against local baselines."""
 
 from __future__ import annotations
 
@@ -201,7 +201,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     correctness = report["correctness"]
     performance = report["performance"]
     lines = [
-        "# TransNetV2 Runtime Candidate Report",
+        "# Runtime Candidate Report",
         "",
         f"Status: **{status}**",
         "",
