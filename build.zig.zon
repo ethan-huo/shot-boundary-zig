@@ -1,7 +1,7 @@
 .{
-    .name = .shot_boundary_zig,
+    .name = .shot_boundary,
     .version = "0.0.0",
-    .fingerprint = 0x9a31bb66df09cf98,
+    .fingerprint = 0xec2d58be3e29586e,
     .dependencies = .{
         .ziglint = .{
             .url = "https://github.com/rockorager/ziglint/archive/refs/tags/v0.5.2.tar.gz",

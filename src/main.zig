@@ -13,9 +13,9 @@ const default_scene_threshold: f32 = spec.default_scene_threshold;
 
 const usage =
     \\usage:
-    \\  shot_boundary_zig env
-    \\  shot_boundary_zig decode-smoke <video> [options]
-    \\  shot_boundary_zig segment <video> --weights <path> [options]
+    \\  shot-boundary env
+    \\  shot-boundary decode-smoke <video> [options]
+    \\  shot-boundary segment <video> --weights <path> [options]
     \\
     \\decode-smoke options:
     \\  --format <json|txt>          output format, default json
