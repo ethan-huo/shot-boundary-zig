@@ -54,7 +54,7 @@ def validate_state_dict(upstream: Path, state_dict) -> None:
     from transnetv2_pytorch import TransNetV2
 
     expected = TransNetV2().state_dict()
-    missing = sorted(set(expected) - set(state_dict))
+    missing = sorted(name for name in set(expected) - set(state_dict) if not name.endswith("num_batches_tracked"))
     extra = sorted(set(state_dict) - set(expected) - {name for name in state_dict if name.endswith("num_batches_tracked")})
     mismatched = sorted(
         name

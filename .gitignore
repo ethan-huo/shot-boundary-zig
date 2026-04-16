@@ -12,3 +12,6 @@ zig-pkg/
 .agents/
 .claude/
 skills-lock.json
+web/node_modules/
+web/dist/
+web/public/ort-wasm/

@@ -1,0 +1,36 @@
+{
+  "model": "TransNetV2",
+  "format": "onnx",
+  "opset": 18,
+  "input": {
+    "name": "frames",
+    "dtype": "uint8",
+    "shape": [
+      "batch",
+      100,
+      27,
+      48,
+      3
+    ]
+  },
+  "outputs": [
+    {
+      "name": "single_frame",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        50
+      ],
+      "activation": "sigmoid"
+    },
+    {
+      "name": "many_hot",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        50
+      ],
+      "activation": "sigmoid"
+    }
+  ]
+}

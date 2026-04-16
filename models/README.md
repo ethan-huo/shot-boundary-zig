@@ -13,7 +13,8 @@ The upstream checkpoint `ckpt_0_200_0.pth` (sha256: `3e85290546ce6d32f4a3581ec2c
 Explicit fallback/comparison artifact:
 
 - `transnetv2.safetensors`
+- `transnetv2.onnx`
+- `transnetv2.manifest.json` and `transnetv2.onnx.manifest.json` export metadata
 
 AutoShot remains the default runtime model. On macOS, TransNetV2 is selectable with `--model transnetv2` and loads from `{prefix}/models/transnetv2.safetensors` when `--weights` is omitted.
-
-There is no committed `transnetv2.onnx` artifact in this checkout yet. Linux can still use an explicit TransNetV2 ONNX path once that artifact is regenerated, but the default installed Linux artifact is currently AutoShot.
+On Linux and in the Web prototype, TransNetV2 loads from `{prefix}/models/transnetv2.onnx` when selected.
